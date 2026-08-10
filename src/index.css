@@ -1,0 +1,4 @@
+html { background: #f7f7fa; }
+html[data-theme='dark'] { background: #101117; }
+body { margin: 0; min-width: 320px; min-height: 100vh; }
+#root { min-height: 100vh; }

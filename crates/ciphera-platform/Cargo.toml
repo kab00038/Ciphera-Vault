@@ -1,0 +1,13 @@
+[package]
+name = "ciphera-platform"
+version = "0.1.0"
+description = "OS secure-storage integration for Ciphera"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+keyring = "=4.1.6"
+sha2 = "0.11"
+thiserror.workspace = true
+zeroize.workspace = true

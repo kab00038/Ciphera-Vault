@@ -1,0 +1,30 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Ciphera Browser</title>
+    <link rel="stylesheet" href="popup.css" />
+  </head>
+  <body>
+    <header>
+      <div class="brand-mark" aria-hidden="true">
+        <svg viewBox="0 0 24 24"><path d="M12 3 5 6v5c0 4.7 2.8 8 7 10 4.2-2 7-5.3 7-10V6l-7-3Z"/><path d="m9.5 12 1.6 1.6 3.8-4"/></svg>
+      </div>
+      <div><strong>Ciphera</strong><span id="status">Connecting…</span></div>
+      <i id="status-dot"></i>
+    </header>
+    <main>
+      <div class="site-row"><span>Logins for</span><strong id="site">this site</strong></div>
+      <div id="results" class="results" aria-live="polite"></div>
+      <div id="empty" class="empty" hidden>
+        <div>+</div><strong>No matching logins</strong><span>Add this website in the Ciphera desktop app.</span>
+      </div>
+      <div id="error" class="empty error" hidden>
+        <div>!</div><strong>Desktop app unavailable</strong><span>Open and unlock Ciphera, then try again.</span>
+      </div>
+    </main>
+    <footer><span>Protected by local native messaging</span><button id="refresh" type="button">Refresh</button></footer>
+    <script src="popup.js"></script>
+  </body>
+</html>

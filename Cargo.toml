@@ -1,0 +1,15 @@
+[workspace]
+members = ["crates/ciphera-core", "crates/ciphera-platform", "src-tauri"]
+resolver = "2"
+
+[workspace.package]
+edition = "2021"
+rust-version = "1.88"
+license = "GPL-3.0-or-later"
+
+[workspace.dependencies]
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+thiserror = "2.0"
+uuid = { version = "1.18", features = ["serde", "v4"] }
+zeroize = { version = "1.8", features = ["zeroize_derive"] }
