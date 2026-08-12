@@ -2,7 +2,7 @@
 
 This is the canonical context for continuing Ciphera. Read it before changing the project.
 
-Last updated: 2026-08-09.
+Last updated: 2026-08-12.
 
 ## Repository
 
@@ -50,8 +50,8 @@ Workspace:
 ```text
 crates/
   ciphera-core/       Vault model, locking, KDBX persistence, search, history, TOTP
-  ciphera-platform/   OS credential-vault quick unlock
-src-tauri/            Tauri commands, native browser bridge, browser installer
+  ciphera-platform/   OS credential-vault PIN quick unlock and attempt limiting
+src-tauri/            Tauri commands, signed updater, native browser bridge, browser installer
 ```
 
 `ciphera-core` now provides:
@@ -93,7 +93,7 @@ React now owns:
 - Generated password/passphrase session history
 - Current TOTP codes, never TOTP secrets
 
-Rust owns the decrypted database and every mutation. Tauri commands cover status, create/open, native file selection, quick unlock, lock, entries, groups, history restore, attachments, rotating-backup restore, password rotation, and TOTP codes.
+Rust owns the decrypted database and every mutation. Tauri commands cover status, create/open, PIN quick unlock, lock, entries, groups, history restore, attachments, rotating-backup restore, password rotation, and TOTP codes.
 
 User-facing local behavior:
 
@@ -106,8 +106,9 @@ User-facing local behavior:
 - Five rotating encrypted recovery snapshots with Settings restore UX
 - Automatic lock after ten minutes of inactivity
 - Best-effort clipboard clearing after 60 seconds
-- Optional OS credential-vault quick unlock after full password verification
-- Quick-unlock disable and master-password rotation in Settings
+- Optional 4 or 6 digit PIN quick unlock after full master-password verification
+- Increasing PIN delays and a five-attempt maximum before master-password reauthentication
+- PIN-unlock disable and master-password rotation in Settings
 - Accurate local password health review for weak, reused, and old passwords
 - Single-instance desktop startup so a second process cannot race the vault or native bridge
 
@@ -198,7 +199,7 @@ Cargo.toml                              Rust workspace and shared dependency pol
 crates/ciphera-core/src/model.rs        Stable serialized domain and response types
 crates/ciphera-core/src/lib.rs          Vault lifecycle, KDBX operations, atomic saves
 crates/ciphera-core/tests/              Real KeePassXC compatibility test
-crates/ciphera-platform/src/lib.rs      OS credential-vault quick unlock
+crates/ciphera-platform/src/lib.rs      OS credential-vault PIN unlock and rate limiting
 src/App.tsx                             Metadata-oriented product UI and Tauri calls
 src/App.css                             Local light/dark design system
 src/security.ts                         Password generator and local strength presentation
@@ -206,8 +207,11 @@ extension/manifest.json                 Chromium extension manifest
 extension/popup.*                       Browser login selection UI
 extension/content.js                    Explicit-action credential filling
 src-tauri/src/main.rs                   Desktop/native-host argument dispatch
-src-tauri/src/lib.rs                    Thin commands, bridge, protocol, installer
-src-tauri/tauri.conf.json               Window, resources, bundle, CSP
+src-tauri/src/lib.rs                    Thin commands, updater/process plugins, bridge, protocol, installer
+src-tauri/tauri.conf.json               Window, updater trust root, resources, bundle, CSP
+packaging/arch/                         Native Arch pacman package recipe and build command
+.github/workflows/package.yml           Per-push native package artifacts
+.github/workflows/release.yml           Tag-triggered releases and updater metadata
 ```
 
 ## Important limitations and next work
@@ -220,10 +224,11 @@ Ciphera now has the local recovery and organization workflows needed for careful
 - KDBX deletion tombstones are written, but recycle-bin browsing and tombstone restoration are not yet exposed.
 - Key files and hardware challenge-response credentials are not implemented.
 - Concurrent external modifications are safely rejected, but automatic merge is not implemented.
-- OS quick unlock depends on platform credential-vault availability and is not guaranteed to require biometric authentication.
+- PIN quick unlock depends on platform credential-vault availability. Its retry policy protects the application flow, not an operating-system account compromise that can access or alter keyring records directly.
 - Clipboard clearing cannot defeat clipboard managers or operating-system history.
 - The extension is not packaged for browser stores.
-- Linux packages are the currently exercised release target. Windows and macOS need native packaging and secure-storage verification.
+- Windows, macOS, Ubuntu-family, and Arch packages are built on native or containerized CI environments; signing certificates and native secure-storage behavior still require release-owner verification.
+- The Tauri Linux updater replaces AppImage installations. Arch pacman packages remain package-manager-owned and must be upgraded with a newer release package.
 - Memory-locking decrypted database pages against swap/core dumps is not implemented by the upstream database model.
 
 The next engineering phase may begin encrypted sync design, followed by capability-limited WASM plugins and shared-core mobile clients. Preserve the offline-first invariant: sync transports ciphertext only, and no server may become necessary to unlock or edit a vault. Before recommending broad production use, complete recycle-bin recovery UX, Windows/macOS validation, fuzzing beyond the deterministic malformed-input regression set, and an independent security review.

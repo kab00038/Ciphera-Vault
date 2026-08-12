@@ -151,6 +151,23 @@ button { color: inherit; }
 .small-modal > label { display: block; color: #96929c; font-size: 8px; font-weight: 700; letter-spacing: .6px; margin: 13px 0; }.small-modal > label input { width: 100%; height: 40px; border: 1px solid #e4e1e8; border-radius: 8px; padding: 0 10px; margin-top: 6px; outline: 0; font-size: 11px; }.small-modal > label input:focus { border-color: #7867df; box-shadow: 0 0 0 3px #f0edff; }
 .history-modal,.group-modal { width: min(520px,100%); }.history-list,.group-list { margin-top: 18px; border-top: 1px solid var(--line); }.history-version,.group-row { min-height: 58px; border-bottom: 1px solid var(--line); display: flex; align-items: center; gap: 10px; }.history-version > svg,.group-row > svg { color: #7464d5; }.history-version > div { min-width: 0; flex: 1; }.history-version strong,.history-version span { display: block; }.history-version strong { font-size: 10.5px; }.history-version span { margin-top: 3px; color: var(--muted); font-size: 8.5px; }.group-create { display: flex; gap: 8px; margin-top: 17px; }.group-create input { flex: 1; min-width: 0; border: 1px solid var(--line); border-radius: 8px; padding: 0 10px; background: transparent; color: var(--ink); }.group-row strong { flex: 1; font-size: 10.5px; }.group-row button { width: 30px; height: 30px; display: grid; place-items: center; border: 0; border-radius: 7px; background: transparent; color: #817d89; }.group-row button:last-child { color: #c36a67; }.path-picker { display: flex; gap: 7px; margin-top: 6px; }.vault-gate .path-picker input { margin-top: 0; flex: 1; min-width: 0; }.path-picker button { border: 1px solid #454252; border-radius: 8px; background: #2b2936; color: #d8d4e2; padding: 0 10px; display: flex; align-items: center; gap: 5px; font-size: 9px; }
 .toast { position: fixed; z-index: 80; bottom: 25px; left: 50%; transform: translateX(-50%); background: #24212d; color: #fff; border-radius: 9px; padding: 10px 15px; box-shadow: 0 10px 30px rgba(22,18,34,.25); display: flex; align-items: center; gap: 7px; font-size: 10.5px; }.toast svg { color: #5ed19f; }
+.pin-unlock-panel { margin: 18px 0 8px; padding: 16px; border: 1px solid #494458; border-radius: 14px; background: rgba(255,255,255,.04); }
+.pin-unlock-panel label { display: block; color: #8f8a9d; font-size: 8px; font-weight: 700; letter-spacing: .7px; text-align: left; }
+.pin-unlock-panel input { width: 100%; height: 46px; margin-top: 7px; border: 1px solid #4b4659; border-radius: 9px; background: #24212d; color: #fff; padding: 0 13px; font-size: 20px; letter-spacing: 8px; text-align: center; outline: 0; }
+.pin-unlock-panel input:focus { border-color: #7867df; box-shadow: 0 0 0 3px rgba(120,103,223,.2); }
+.pin-unlock-panel .biometric-button { width: 100%; height: 46px; margin-top: 10px; }
+.pin-unlock-panel > span { display: block; margin-top: 9px; color: #9690a5; font-size: 9px; }
+.gate-divider { display: flex; align-items: center; gap: 9px; margin: 15px 0 -1px; color: #777181; font-size: 8px; text-transform: uppercase; letter-spacing: .6px; }
+.gate-divider::before,.gate-divider::after { content: ''; height: 1px; flex: 1; background: #45404e; }
+.pin-master-required { display: flex; align-items: center; gap: 7px; width: 280px; margin: 14px auto !important; padding: 10px; border-radius: 9px; background: rgba(214,102,92,.12); color: #f0aaa3 !important; text-align: left; }
+.update-prompt { position: fixed; z-index: 90; right: 24px; bottom: 24px; width: min(470px,calc(100vw - 48px)); display: flex; align-items: center; gap: 12px; padding: 14px; border: 1px solid var(--line); border-radius: 13px; background: var(--white); box-shadow: 0 18px 45px rgba(16,14,26,.24); color: var(--ink); }
+.update-prompt > svg { flex: 0 0 auto; color: #6d5bd6; }
+.update-prompt > div { min-width: 0; flex: 1; }
+.update-prompt strong,.update-prompt span { display: block; }
+.update-prompt strong { font-size: 11px; }
+.update-prompt span { margin-top: 3px; color: var(--muted); font-size: 9px; line-height: 1.4; }
+.update-prompt .secondary-button { flex: 0 0 auto; white-space: nowrap; }
+.update-prompt .icon-button { flex: 0 0 auto; }
 .sidebar-scrim { display: none; }
 
 

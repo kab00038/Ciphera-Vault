@@ -1,6 +1,8 @@
 import { useEffect, useMemo, useState } from 'react'
 import { invoke, isTauri } from '@tauri-apps/api/core'
 import { open, save } from '@tauri-apps/plugin-dialog'
+import { relaunch } from '@tauri-apps/plugin-process'
+import { check, type Update } from '@tauri-apps/plugin-updater'
 import {
   Activity, AlertTriangle, ArrowRight, Asterisk, BadgeCheck,
   Check, ChevronDown, ChevronRight, Clipboard, Clock3, Copy, Download,
@@ -60,7 +62,8 @@ type EntryInput = {
   totp: string | null
 }
 type TotpCode = { id: string; title: string; username: string; code: string; validFor: number; period: number }
-type VaultStatus = { path: string; exists: boolean; unlocked: boolean; quickUnlockAvailable: boolean }
+type PinUnlockStatus = { configured: boolean; attemptsRemaining: number; retryAfterSeconds: number; masterPasswordRequired: boolean }
+type VaultStatus = { path: string; exists: boolean; unlocked: boolean; pinUnlock: PinUnlockStatus }
 
 function decorateItem(item: VaultRecord): VaultItem {
   const colors: Record<string, string> = { GitHub: '#111827', Notion: '#111827', Figma: '#f24e1e', Linear: '#5e6ad2', 'AWS Console': '#ff9900', LinkedIn: '#0a66c2', 'Proton Mail': '#6d4aff' }
@@ -229,11 +232,11 @@ function App() {
   }
 
   if (gate !== 'open') {
-    return <VaultGate mode={gate} status={vaultStatus} onOpen={async () => {
+    return <><VaultGate mode={gate} status={vaultStatus} onOpen={async () => {
       const status = await invoke<VaultStatus>('vault_status', { path: vaultStatus?.path || null })
       setVaultStatus(status)
       setGate('open')
-    }} />
+    }} /><UpdatePrompt /></>
   }
 
   return (
@@ -250,8 +253,64 @@ function App() {
       {editor && <EntryModal initial={editor === 'edit' ? selectedDetail : null} groups={groups} onClose={() => setEditor(null)} onSave={saveEntry} />}
       {groupsOpen && <GroupManager groups={groups} onClose={() => setGroupsOpen(false)} onChanged={loadItems} />}
       {toast && <div className="toast"><Check size={16} />{toast}</div>}
+      <UpdatePrompt />
     </div>
   )
+}
+
+function UpdatePrompt() {
+  const [update, setUpdate] = useState<Update | null>(null)
+  const [state, setState] = useState<'checking' | 'ready' | 'installing' | 'error'>('checking')
+  const [progress, setProgress] = useState(0)
+  const [error, setError] = useState('')
+
+  useEffect(() => {
+    if (!isTauri()) return
+    let active = true
+    const timer = window.setTimeout(() => {
+      check().then((available) => {
+        if (!active) return
+        setUpdate(available)
+        setState(available ? 'ready' : 'checking')
+      }).catch(() => {
+        if (active) setState('checking')
+      })
+    }, 2_000)
+    return () => {
+      active = false
+      window.clearTimeout(timer)
+    }
+  }, [])
+
+  if (!update || state === 'checking') return null
+
+  const install = async () => {
+    setState('installing')
+    setError('')
+    let downloaded = 0
+    let contentLength = 0
+    try {
+      await update.downloadAndInstall((event) => {
+        if (event.event === 'Started') contentLength = event.data.contentLength ?? 0
+        if (event.event === 'Progress') {
+          downloaded += event.data.chunkLength
+          if (contentLength > 0) setProgress(Math.min(100, Math.round(downloaded / contentLength * 100)))
+        }
+        if (event.event === 'Finished') setProgress(100)
+      })
+      await relaunch()
+    } catch (cause) {
+      setError(errorMessage(cause))
+      setState('error')
+    }
+  }
+
+  return <div className="update-prompt" role="status">
+    <Download size={21} />
+    <div><strong>Ciphera {update.version} is available</strong><span>{state === 'installing' ? `Downloading and verifying… ${progress}%` : error || 'Install the signed update without downloading an installer manually.'}</span></div>
+    <button className="secondary-button" onClick={install} disabled={state === 'installing'}>{state === 'installing' ? 'Installing…' : state === 'error' ? 'Retry' : 'Update and restart'}</button>
+    {state !== 'installing' && <button className="icon-button" aria-label="Dismiss update" onClick={() => setUpdate(null)}><X size={17} /></button>}
+  </div>
 }
 
 function Sidebar({ view, navigate, open, onClose }: { view: View; navigate: (view: View) => void; open: boolean; onClose: () => void }) {
@@ -547,8 +606,10 @@ function TwoFactorView({ onCopy }: { onCopy: (value: string, message?: string) =
 
 function SettingsView({ onVaultRestored }: { onVaultRestored: () => Promise<void> }) {
   const [status, setStatus] = useState<VaultStatus | null>(null)
-  const [quickPassword, setQuickPassword] = useState('')
-  const [quickOpen, setQuickOpen] = useState(false)
+  const [pinPassword, setPinPassword] = useState('')
+  const [pin, setPin] = useState('')
+  const [confirmPin, setConfirmPin] = useState('')
+  const [pinOpen, setPinOpen] = useState(false)
   const [passwordOpen, setPasswordOpen] = useState(false)
   const [currentPassword, setCurrentPassword] = useState('')
   const [newPassword, setNewPassword] = useState('')
@@ -566,21 +627,31 @@ function SettingsView({ onVaultRestored }: { onVaultRestored: () => Promise<void
   useEffect(() => {
     refresh().catch((cause) => setError(errorMessage(cause)))
   }, [])
-  const disableQuickUnlock = async () => {
+  const disablePinUnlock = async () => {
     try {
-      await invoke('disable_quick_unlock', { path: status?.path || null })
+      await invoke('disable_pin_unlock', { path: status?.path || null })
       await refresh()
     } catch (cause) {
       setError(errorMessage(cause))
     }
   }
-  const enableQuickUnlock = async (event: React.FormEvent) => {
+  const enablePinUnlock = async (event: React.FormEvent) => {
     event.preventDefault()
     setError('')
+    if (pin !== confirmPin) {
+      setError('PINs do not match')
+      return
+    }
+    if (!/^(?:\\d{4}|\\d{6})$/.test(pin)) {
+      setError('PIN must contain exactly 4 or 6 digits')
+      return
+    }
     try {
-      await invoke('enable_quick_unlock', { path: status?.path || null, password: quickPassword })
-      setQuickPassword('')
-      setQuickOpen(false)
+      await invoke('enable_pin_unlock', { path: status?.path || null, password: pinPassword, pin })
+      setPinPassword('')
+      setPin('')
+      setConfirmPin('')
+      setPinOpen(false)
       await refresh()
     } catch (cause) {
       setError(errorMessage(cause))
@@ -622,7 +693,7 @@ function SettingsView({ onVaultRestored }: { onVaultRestored: () => Promise<void
         <div className="section-heading"><div><h2>Security</h2><p>Protection on this device</p></div><ShieldCheck size={23} /></div>
         <div className="setting-row"><span className="setting-icon"><Clock3 size={19} /></span><div><strong>Automatic lock</strong><span>Ciphera locks after 10 minutes of inactivity</span></div><BadgeCheck size={18} /></div>
         <div className="setting-row"><span className="setting-icon"><Clipboard size={19} /></span><div><strong>Clear clipboard</strong><span>Copied secrets clear after 60 seconds</span></div><BadgeCheck size={18} /></div>
-        <div className="setting-row"><span className="setting-icon"><Fingerprint size={19} /></span><div><strong>OS quick unlock</strong><span>{status?.quickUnlockAvailable ? 'Master password protected by your OS credential vault' : 'Not configured on this device'}</span></div>{status?.quickUnlockAvailable ? <button className="text-button" onClick={disableQuickUnlock}>Disable</button> : <button className="text-button" onClick={() => setQuickOpen(true)}>Enable</button>}</div>
+        <div className="setting-row"><span className="setting-icon"><Fingerprint size={19} /></span><div><strong>PIN quick unlock</strong><span>{status?.pinUnlock.configured ? status.pinUnlock.masterPasswordRequired ? 'Master password required after too many failed PIN attempts' : `Protected by the OS credential vault · ${status.pinUnlock.attemptsRemaining} attempts available` : 'Not configured on this device'}</span></div>{status?.pinUnlock.configured ? <button className="text-button" onClick={disablePinUnlock}>Disable</button> : <button className="text-button" onClick={() => setPinOpen(true)}>Enable</button>}</div>
         <div className="setting-row"><span className="setting-icon"><KeyRound size={19} /></span><div><strong>Master password</strong><span>Re-encrypt the vault with a new master password</span></div><button className="text-button" onClick={() => setPasswordOpen(true)}>Change</button></div>
       </section>
       <aside className="card encryption-card">
@@ -639,9 +710,9 @@ function SettingsView({ onVaultRestored }: { onVaultRestored: () => Promise<void
       <div className="section-heading"><div><h2>Recovery snapshots</h2><p>Five encrypted prior versions rotate beside your vault file</p></div><History size={22} /></div>
       <div className="backup-list">{backups.map((backup) => <div className="backup-row" key={backup.index}><span><History size={16} /></span><div><strong>{backup.index === 0 ? 'Most recent prior save' : `Earlier save ${backup.index + 1}`}</strong><small>{backup.modifiedAt ? new Date(backup.modifiedAt).toLocaleString() : backup.path} · {(backup.size / 1024).toFixed(1)} KiB</small></div><button className="secondary-button" onClick={() => restoreBackup(backup)}><RotateCcw size={14} />Restore</button></div>)}{!backups.length && <div className="empty-state compact"><History size={22} /><strong>No recovery snapshots yet</strong><span>A snapshot is created before each successful vault change.</span></div>}</div>
     </section>
-    {quickOpen && <div className="modal-backdrop"><form className="modal small-modal" onSubmit={enableQuickUnlock}><button type="button" className="modal-close" onClick={() => setQuickOpen(false)}><X size={20} /></button><span className="modal-icon"><Fingerprint /></span><h2>Enable OS quick unlock</h2><p>Confirm your master password. It will be stored only in the operating system credential vault.</p><label>MASTER PASSWORD<input type="password" value={quickPassword} onChange={(event) => setQuickPassword(event.target.value)} autoFocus required /></label>{error && <p className="form-error">{error}</p>}<button className="primary-button modal-save">Enable quick unlock</button></form></div>}
+    {pinOpen && <div className="modal-backdrop"><form className="modal small-modal add-modal" onSubmit={enablePinUnlock}><button type="button" className="modal-close" onClick={() => setPinOpen(false)}><X size={20} /></button><span className="modal-icon"><Fingerprint /></span><h2>Enable PIN quick unlock</h2><p>Confirm your master password, then choose a 4 or 6 digit PIN. Five failed attempts require the master password again.</p><label>MASTER PASSWORD<input type="password" value={pinPassword} onChange={(event) => setPinPassword(event.target.value)} autoFocus autoComplete="current-password" required /></label><label>PIN<input type="password" inputMode="numeric" pattern="(?:[0-9]{4}|[0-9]{6})" value={pin} onChange={(event) => setPin(event.target.value.replace(/\D/g, '').slice(0, 6))} autoComplete="new-password" required /></label><label>CONFIRM PIN<input type="password" inputMode="numeric" pattern="(?:[0-9]{4}|[0-9]{6})" value={confirmPin} onChange={(event) => setConfirmPin(event.target.value.replace(/\D/g, '').slice(0, 6))} autoComplete="new-password" required /></label>{error && <p className="form-error">{error}</p>}<button className="primary-button modal-save">Enable PIN unlock</button></form></div>}
     {passwordOpen && <div className="modal-backdrop"><form className="modal small-modal add-modal" onSubmit={changePassword}><button type="button" className="modal-close" onClick={() => setPasswordOpen(false)}><X size={20} /></button><span className="modal-icon"><KeyRound /></span><h2>Change master password</h2><p>The vault will be verified, backed up, and atomically re-encrypted.</p><label>CURRENT PASSWORD<input type="password" value={currentPassword} onChange={(event) => setCurrentPassword(event.target.value)} autoFocus required /></label><label>NEW PASSWORD<input type="password" value={newPassword} onChange={(event) => setNewPassword(event.target.value)} required /></label><label>CONFIRM NEW PASSWORD<input type="password" value={confirmPassword} onChange={(event) => setConfirmPassword(event.target.value)} required /></label>{error && <p className="form-error">{error}</p>}<button className="primary-button modal-save">Change master password</button></form></div>}
-    {!quickOpen && !passwordOpen && error && <p className="form-error settings-error">{error}</p>}
+    {!pinOpen && !passwordOpen && error && <p className="form-error settings-error">{error}</p>}
   </div>
 }
 
@@ -732,12 +803,16 @@ function VaultGate({ mode, status, onOpen }: { mode: 'loading' | 'create' | 'unl
   const [creating, setCreating] = useState(mode === 'create')
   const [password, setPassword] = useState('')
   const [confirmPassword, setConfirmPassword] = useState('')
-  const [quickUnlock, setQuickUnlock] = useState(false)
+  const [pin, setPin] = useState('')
+  const [pinStatus, setPinStatus] = useState(status?.pinUnlock)
   const [working, setWorking] = useState(false)
   const [error, setError] = useState('')
   useEffect(() => {
     if (status?.path) setPath(status.path)
   }, [status?.path])
+  useEffect(() => {
+    setPinStatus(status?.pinUnlock)
+  }, [status?.pinUnlock])
   useEffect(() => {
     setCreating(mode === 'create')
   }, [mode])
@@ -753,7 +828,7 @@ function VaultGate({ mode, status, onOpen }: { mode: 'loading' | 'create' | 'unl
     setWorking(true)
     setError('')
     try {
-      await invoke(create ? 'create_vault' : 'unlock_vault', create ? { path: path || null, password, enableQuickUnlock: quickUnlock } : { path: path || null, password })
+      await invoke(create ? 'create_vault' : 'unlock_vault', { path: path || null, password })
       setPassword('')
       setConfirmPassword('')
       await onOpen()
@@ -762,14 +837,17 @@ function VaultGate({ mode, status, onOpen }: { mode: 'loading' | 'create' | 'unl
       setWorking(false)
     }
   }
-  const quick = async () => {
+  const unlockWithPin = async () => {
     setWorking(true)
     setError('')
     try {
-      await invoke('quick_unlock_vault', { path: path || null })
+      await invoke('pin_unlock_vault', { path: path || null, pin })
+      setPin('')
       await onOpen()
     } catch (cause) {
       setError(errorMessage(cause))
+      const next = await invoke<VaultStatus>('vault_status', { path: path || null }).catch(() => null)
+      if (next) setPinStatus(next.pinUnlock)
       setWorking(false)
     }
   }
@@ -778,15 +856,22 @@ function VaultGate({ mode, status, onOpen }: { mode: 'loading' | 'create' | 'unl
     const chosen = create
       ? await save({ defaultPath: path || 'Ciphera Vault.kdbx', filters, title: 'Create encrypted vault' })
       : await open({ multiple: false, directory: false, filters, title: 'Open encrypted vault' })
-    if (typeof chosen === 'string') setPath(chosen)
+    if (typeof chosen === 'string') {
+      setPath(chosen)
+      if (!create) {
+        const next = await invoke<VaultStatus>('vault_status', { path: chosen }).catch(() => null)
+        if (next) setPinStatus(next.pinUnlock)
+      }
+    }
   }
   return <div className="lock-screen"><form className="lock-card vault-gate" onSubmit={submit}><div className="brand-mark large-mark"><ShieldCheck size={28} /></div><h1>{create ? 'Create your vault' : 'Welcome back'}</h1><p>{create ? 'Choose a master password. Ciphera cannot recover it.' : 'Unlock your encrypted local KDBX vault.'}</p>
     <label>VAULT FILE<div className="path-picker"><input value={path} onChange={(event) => setPath(event.target.value)} placeholder="/path/to/vault.kdbx" /><button type="button" onClick={chooseVaultFile}><FolderOpen size={17} />Browse</button></div></label>
-    <label>MASTER PASSWORD<input type="password" value={password} onChange={(event) => setPassword(event.target.value)} autoFocus autoComplete={create ? 'new-password' : 'current-password'} required /></label>
-    {create && <><label>CONFIRM PASSWORD<input type="password" value={confirmPassword} onChange={(event) => setConfirmPassword(event.target.value)} autoComplete="new-password" required /></label><label className="quick-unlock-choice"><input type="checkbox" checked={quickUnlock} onChange={(event) => setQuickUnlock(event.target.checked)} />Store quick-unlock secret in the OS credential vault</label></>}
+    {!create && pinStatus?.configured && !pinStatus.masterPasswordRequired && <div className="pin-unlock-panel"><label>QUICK-UNLOCK PIN<input type="password" inputMode="numeric" pattern="(?:[0-9]{4}|[0-9]{6})" value={pin} onChange={(event) => setPin(event.target.value.replace(/\D/g, '').slice(0, 6))} onKeyDown={(event) => { if (event.key === 'Enter' && (pin.length === 4 || pin.length === 6)) { event.preventDefault(); unlockWithPin() } }} autoFocus autoComplete="current-password" /></label><button type="button" className="biometric-button" disabled={working || ![4, 6].includes(pin.length)} onClick={unlockWithPin}><Fingerprint size={22} />{working ? 'Working…' : 'Unlock with PIN'}</button><span>{pinStatus.attemptsRemaining} attempts remaining{pinStatus.retryAfterSeconds ? ` · wait ${pinStatus.retryAfterSeconds}s` : ''}</span><div className="gate-divider">or use your master password</div></div>}
+    {!create && pinStatus?.masterPasswordRequired && <p className="pin-master-required"><AlertTriangle size={16} />Too many failed PIN attempts. Unlock once with your master password to re-enable the PIN.</p>}
+    <label>MASTER PASSWORD<input type="password" value={password} onChange={(event) => setPassword(event.target.value)} autoFocus={create || !pinStatus?.configured || pinStatus.masterPasswordRequired} autoComplete={create ? 'new-password' : 'current-password'} required /></label>
+    {create && <label>CONFIRM PASSWORD<input type="password" value={confirmPassword} onChange={(event) => setConfirmPassword(event.target.value)} autoComplete="new-password" required /></label>}
     {error && <p className="form-error">{error}</p>}
-    <button className="biometric-button" disabled={working}><Lock size={22} />{working ? 'Working…' : create ? 'Create encrypted vault' : 'Unlock vault'}</button>
-    {!create && status?.quickUnlockAvailable && <button type="button" className="text-button" disabled={working} onClick={quick}><Fingerprint size={18} />Use OS quick unlock</button>}
+    <button className="biometric-button" disabled={working}><Lock size={22} />{working ? 'Working…' : create ? 'Create encrypted vault' : 'Unlock with master password'}</button>
     <button type="button" className="text-button" disabled={working} onClick={() => { setCreating((value) => !value); setError('') }}>{create ? 'Open an existing KDBX file' : 'Create a new vault instead'}</button>
     <span><Lock size={13} />Offline · KDBX 4.1 · Argon2id</span>
   </form></div>

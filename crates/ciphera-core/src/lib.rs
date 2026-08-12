@@ -444,9 +444,7 @@ impl Vault {
                 .database
                 .entry(entry_id)
                 .ok_or(VaultError::EntryNotFound)?;
-            let historical = entry
-                .historical(index)
-                .ok_or(VaultError::HistoryNotFound)?;
+            let historical = entry.historical(index).ok_or(VaultError::HistoryNotFound)?;
             EntryInput {
                 group_id: None,
                 title: historical.get(fields::TITLE).unwrap_or_default().to_owned(),
@@ -541,9 +539,10 @@ impl Vault {
             .filter_map(|index| {
                 let path = backup_path_at(&state.path, index);
                 let metadata = fs::metadata(&path).ok()?;
-                let modified_at = metadata.modified().ok().map(|modified| {
-                    DateTime::<Utc>::from(modified).to_rfc3339()
-                });
+                let modified_at = metadata
+                    .modified()
+                    .ok()
+                    .map(|modified| DateTime::<Utc>::from(modified).to_rfc3339());
                 Some(BackupInfo {
                     index,
                     path: path.display().to_string(),
@@ -571,8 +570,7 @@ impl Vault {
             return Err(VaultError::ExternalModification);
         }
         let bytes = fs::read(backup)?;
-        let mut database =
-            Database::parse(&bytes, state.key.clone()).map_err(map_open_error)?;
+        let mut database = Database::parse(&bytes, state.key.clone()).map_err(map_open_error)?;
         database.config.version = DatabaseVersion::KDB4(1);
         rotate_backups(&state.path, &current)?;
         atomic_write_private(&state.path, &bytes)?;
@@ -842,7 +840,11 @@ fn kdf_parameters(config: &KdfConfig) -> KdfParameters {
 }
 
 fn save_state(state: &mut UnlockedVault) -> Result<(), VaultError> {
-    let existing = state.path.exists().then(|| fs::read(&state.path)).transpose()?;
+    let existing = state
+        .path
+        .exists()
+        .then(|| fs::read(&state.path))
+        .transpose()?;
     if let (Some(expected), Some(current)) = (state.disk_hash, existing.as_ref()) {
         if hash_bytes(current) != expected {
             return Err(VaultError::ExternalModification);
@@ -882,8 +884,7 @@ fn logical_database_matches(expected: &Database, actual: &Database) -> bool {
         if group.name != other.name
             || group.notes != other.notes
             || group.tags != other.tags
-            || group.parent().map(|parent| parent.id())
-                != other.parent().map(|parent| parent.id())
+            || group.parent().map(|parent| parent.id()) != other.parent().map(|parent| parent.id())
         {
             return false;
         }
@@ -1191,9 +1192,7 @@ mod tests {
         vault
             .create_with_parameters(&path, "master password", test_kdf())
             .expect("create vault");
-        let group = vault
-            .create_group(None, "Work")
-            .expect("create work group");
+        let group = vault.create_group(None, "Work").expect("create work group");
         let mut input = login("UniquePassword42");
         input.group_id = Some(group.id.clone());
         let created = vault.add_entry(input).expect("add grouped entry");
@@ -1211,9 +1210,7 @@ mod tests {
         ));
 
         vault.lock();
-        vault
-            .open(&path, "master password")
-            .expect("reopen vault");
+        vault.open(&path, "master password").expect("reopen vault");
         assert_eq!(
             vault
                 .attachment(&created.summary.id, "recovery-codes.txt")
@@ -1259,7 +1256,13 @@ mod tests {
         vault
             .update_entry(&created.summary.id, login("ThirdPassword42"))
             .expect("second update");
-        assert_eq!(vault.entry_history(&created.summary.id).expect("history").len(), 2);
+        assert_eq!(
+            vault
+                .entry_history(&created.summary.id)
+                .expect("history")
+                .len(),
+            2
+        );
         assert!(vault.backups().expect("backups").len() >= 3);
 
         vault.restore_backup(0).expect("restore most recent backup");

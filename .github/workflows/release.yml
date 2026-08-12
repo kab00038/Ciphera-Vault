@@ -1,22 +1,17 @@
-name: Package desktop application
+name: Publish desktop release
 
 on:
   push:
-    branches:
-      - "**"
-  pull_request:
+    tags:
+      - "v[0-9]+.[0-9]+.[0-9]+"
   workflow_dispatch:
 
 permissions:
-  contents: read
-
-concurrency:
-  group: package-${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  contents: write
 
 jobs:
   verify:
-    name: Verify source
+    name: Verify release source
     runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v7
@@ -36,25 +31,20 @@ jobs:
         with:
           toolchain: 1.88.0
 
-      - name: Cache Rust build output
-        uses: swatinem/rust-cache@v2
+      - uses: swatinem/rust-cache@v2
         with:
           workspaces: "./ -> target"
 
-      - name: Install frontend dependencies
-        run: npm ci
+      - run: npm ci
+      - name: Match tag to application version
+        if: startsWith(github.ref, 'refs/tags/')
+        run: test "$GITHUB_REF_NAME" = "v$(jq -r .version src-tauri/tauri.conf.json)"
+      - run: npm run lint
+      - run: npm run build
+      - run: cargo test --workspace --locked
 
-      - name: Lint frontend
-        run: npm run lint
-
-      - name: Build frontend
-        run: npm run build
-
-      - name: Test Rust workspace
-        run: cargo test --workspace --locked
-
-  package:
-    name: Package ${{ matrix.name }}
+  publish:
+    name: Publish ${{ matrix.name }}
     needs: verify
     strategy:
       fail-fast: false
@@ -62,20 +52,16 @@ jobs:
         include:
           - name: Linux x86_64
             platform: ubuntu-22.04
-            args: --no-sign --bundles appimage,deb,rpm
-            artifact: linux-x86_64
+            args: --bundles appimage,deb,rpm
           - name: Windows x86_64
             platform: windows-latest
-            args: --no-sign --bundles nsis,msi
-            artifact: windows-x86_64
+            args: --bundles nsis,msi
           - name: macOS Apple Silicon
             platform: macos-latest
-            args: --no-sign --target aarch64-apple-darwin --bundles dmg
-            artifact: macos-aarch64
+            args: --target aarch64-apple-darwin --bundles dmg
           - name: macOS Intel
             platform: macos-latest
-            args: --no-sign --target x86_64-apple-darwin --bundles dmg
-            artifact: macos-x86_64
+            args: --target x86_64-apple-darwin --bundles dmg
 
     runs-on: ${{ matrix.platform }}
     steps:
@@ -98,33 +84,40 @@ jobs:
           toolchain: 1.88.0
           targets: ${{ startsWith(matrix.name, 'macOS') && 'aarch64-apple-darwin,x86_64-apple-darwin' || '' }}
 
-      - name: Cache Rust build output
-        uses: swatinem/rust-cache@v2
+      - uses: swatinem/rust-cache@v2
         with:
           workspaces: "./ -> target"
 
-      - name: Install frontend dependencies
-        run: npm ci
+      - run: npm ci
 
-      - name: Build native packages
+      - name: Build and upload signed update
         uses: tauri-apps/tauri-action@v1
         env:
           APPIMAGE_EXTRACT_AND_RUN: "1"
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
         with:
+          tagName: v__VERSION__
+          releaseName: Ciphera v__VERSION__
+          releaseBody: Download the installer for your platform. Existing installations can update from inside Ciphera.
+          generateReleaseNotes: true
+          releaseDraft: true
+          prerelease: false
+          updaterJsonPreferNsis: true
           args: ${{ matrix.args }}
-          uploadWorkflowArtifacts: true
-          workflowArtifactNamePattern: ciphera-${{ matrix.artifact }}-[bundle]
 
-  package-arch:
-    name: Package Arch Linux x86_64
-    needs: verify
+  publish-arch:
+    name: Publish Arch Linux x86_64
+    needs:
+      - verify
+      - publish
     runs-on: ubuntu-22.04
     container: archlinux:base-devel
     steps:
       - uses: actions/checkout@v7
 
       - name: Install Arch build dependencies
-        run: pacman -Syu --noconfirm git gtk3 nodejs npm rust webkit2gtk-4.1
+        run: pacman -Syu --noconfirm git github-cli gtk3 nodejs npm rust webkit2gtk-4.1
 
       - name: Build pacman package
         run: |
@@ -132,9 +125,9 @@ jobs:
           chown -R builder:builder \"$GITHUB_WORKSPACE\"
           runuser -u builder -- ./packaging/arch/build-package.sh
 
-      - name: Upload Arch package
-        uses: actions/upload-artifact@v6
-        with:
-          name: ciphera-arch-x86_64-pacman
-          path: packaging/arch/*.pkg.tar.zst
-          if-no-files-found: error
+      - name: Upload package to draft release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          tag=\"v$(node -p \"require('./package.json').version\")\"
+          gh release upload \"$tag\" packaging/arch/*.pkg.tar.zst --clobber

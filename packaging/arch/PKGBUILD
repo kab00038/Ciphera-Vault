@@ -1,0 +1,46 @@
+pkgname=ciphera
+pkgver=0.1.0
+pkgrel=1
+pkgdesc='Offline-first password manager with optional browser integration'
+arch=('x86_64')
+url='https://github.com/kab00038/Ciphera-Vault'
+license=('GPL-3.0-or-later')
+depends=('gtk3' 'webkit2gtk-4.1')
+makedepends=('nodejs' 'npm' 'rust')
+optdepends=('gnome-keyring: Secret Service provider for PIN quick unlock'
+            'keepassxc: KDBX interoperability and Secret Service provider')
+provides=('ciphera')
+conflicts=('ciphera')
+options=('!lto')
+source=()
+sha256sums=()
+
+_repo_root="$(realpath ../..)"
+
+build() {
+  cd "$_repo_root"
+  local app_version
+  app_version="$(node --print "require('$_repo_root/package.json').version")"
+  if [[ "$app_version" != "$pkgver" ]]; then
+    printf 'PKGBUILD version %s does not match application version %s\n' "$pkgver" "$app_version" >&2
+    return 1
+  fi
+  npm ci
+  CI=true npm exec -- tauri build --no-bundle
+}
+
+package() {
+  install -Dm755 "$_repo_root/target/release/ciphera" "$pkgdir/usr/bin/ciphera"
+  install -Dm644 "$_repo_root/packaging/arch/ciphera.desktop" \
+    "$pkgdir/usr/share/applications/ciphera.desktop"
+
+  install -Dm644 "$_repo_root/src-tauri/icons/32x32.png" \
+    "$pkgdir/usr/share/icons/hicolor/32x32/apps/ciphera.png"
+  install -Dm644 "$_repo_root/src-tauri/icons/128x128.png" \
+    "$pkgdir/usr/share/icons/hicolor/128x128/apps/ciphera.png"
+  install -Dm644 "$_repo_root/src-tauri/icons/icon.png" \
+    "$pkgdir/usr/share/icons/hicolor/512x512/apps/ciphera.png"
+
+  install -d "$pkgdir/usr/lib/Ciphera/_up_/extension"
+  cp -a "$_repo_root/extension/." "$pkgdir/usr/lib/Ciphera/_up_/extension/"
+}

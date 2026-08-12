@@ -1,5 +1,5 @@
 use ciphera_core::{origin_matches, EntryCategory, EntryInput, Vault, VaultError, VaultInfo};
-use ciphera_platform::{QuickUnlockStore, SecureStorageError};
+use ciphera_platform::{PinUnlockStatus, PinUnlockStore, QuickUnlockStore, SecureStorageError};
 use rand::RngCore;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -22,6 +22,7 @@ const MAX_NATIVE_MESSAGE_SIZE: usize = 1024 * 1024;
 struct AppState {
     descriptor: BridgeDescriptor,
     vault: Arc<Mutex<Vault>>,
+    pin_state_lock: Arc<Mutex<()>>,
 }
 
 #[derive(Clone, Deserialize, Serialize)]
@@ -74,7 +75,11 @@ impl From<SecureStorageError> for CommandError {
     fn from(error: SecureStorageError) -> Self {
         let code = match error {
             SecureStorageError::Unavailable => "secure_storage_unavailable",
-            SecureStorageError::NotConfigured => "quick_unlock_not_configured",
+            SecureStorageError::NotConfigured => "pin_unlock_not_configured",
+            SecureStorageError::InvalidPinFormat => "invalid_pin_format",
+            SecureStorageError::InvalidPin { .. } => "invalid_pin",
+            SecureStorageError::MasterPasswordRequired => "pin_master_password_required",
+            SecureStorageError::RateLimited { .. } => "pin_rate_limited",
         };
         Self {
             code,
@@ -89,7 +94,7 @@ struct VaultStatus {
     path: String,
     exists: bool,
     unlocked: bool,
-    quick_unlock_available: bool,
+    pin_unlock: PinUnlockStatus,
     info: Option<VaultInfo>,
 }
 
@@ -247,7 +252,11 @@ fn start_bridge(vault: Arc<Mutex<Vault>>) -> Result<AppState, String> {
         &descriptor_path()?,
         &serde_json::to_vec(&descriptor).map_err(|error| error.to_string())?,
     )?;
-    let state = AppState { descriptor, vault };
+    let state = AppState {
+        descriptor,
+        vault,
+        pin_state_lock: Arc::new(Mutex::new(())),
+    };
     let server_state = state.clone();
     thread::spawn(move || {
         for stream in listener.incoming().flatten() {
@@ -290,12 +299,16 @@ fn vault_status(
         .as_ref()
         .map(|info| PathBuf::from(&info.path))
         .unwrap_or(path);
-    let quick_unlock_available = QuickUnlockStore.load(&path).is_ok();
+    let pin_unlock = PinUnlockStore.status(&path);
+    if !pin_unlock.configured {
+        // Remove legacy zero-interaction quick-unlock secrets during the PIN-only cutover.
+        let _ = QuickUnlockStore.remove(&path);
+    }
     Ok(VaultStatus {
         path: path.display().to_string(),
         exists: path.is_file(),
         unlocked,
-        quick_unlock_available,
+        pin_unlock,
         info,
     })
 }
@@ -304,7 +317,6 @@ fn vault_status(
 fn create_vault(
     path: Option<String>,
     password: String,
-    enable_quick_unlock: bool,
     state: State<'_, AppState>,
 ) -> Result<VaultInfo, CommandError> {
     let path = requested_vault_path(path)?;
@@ -314,22 +326,11 @@ fn create_vault(
     if path.exists() {
         return Err(VaultError::AlreadyExists(path).into());
     }
-    if enable_quick_unlock {
-        QuickUnlockStore.save(&path, &password)?;
-    }
     let mut vault = state.vault.lock().map_err(|_| CommandError {
         code: "vault_state_unavailable",
         message: "Vault state is unavailable".to_owned(),
     })?;
-    match vault.create(&path, &password) {
-        Ok(info) => Ok(info),
-        Err(error) => {
-            if enable_quick_unlock {
-                let _ = QuickUnlockStore.remove(&path);
-            }
-            Err(error.into())
-        }
-    }
+    vault.create(&path, &password).map_err(Into::into)
 }
 
 #[tauri::command]
@@ -339,23 +340,34 @@ fn unlock_vault(
     state: State<'_, AppState>,
 ) -> Result<VaultInfo, CommandError> {
     let path = requested_vault_path(path)?;
-    state
+    let _pin_guard = state.pin_state_lock.lock().map_err(|_| CommandError {
+        code: "pin_state_unavailable",
+        message: "PIN state is unavailable".to_owned(),
+    })?;
+    let info = state
         .vault
         .lock()
         .map_err(|_| CommandError {
             code: "vault_state_unavailable",
             message: "Vault state is unavailable".to_owned(),
         })?
-        .open(path, &password)
-        .map_err(Into::into)
+        .open(&path, &password)?;
+    let _ = PinUnlockStore.reset_after_master_password(&path);
+    Ok(info)
 }
 
 #[tauri::command]
-fn quick_unlock_vault(
+fn pin_unlock_vault(
     path: Option<String>,
+    pin: String,
     state: State<'_, AppState>,
 ) -> Result<VaultInfo, CommandError> {
     let path = requested_vault_path(path)?;
+    let _pin_guard = state.pin_state_lock.lock().map_err(|_| CommandError {
+        code: "pin_state_unavailable",
+        message: "PIN state is unavailable".to_owned(),
+    })?;
+    PinUnlockStore.verify(&path, &pin)?;
     let secret = QuickUnlockStore.load(&path)?;
     state
         .vault
@@ -369,19 +381,40 @@ fn quick_unlock_vault(
 }
 
 #[tauri::command]
-fn enable_quick_unlock(path: Option<String>, password: String) -> Result<(), CommandError> {
+fn enable_pin_unlock(
+    path: Option<String>,
+    password: String,
+    pin: String,
+    state: State<'_, AppState>,
+) -> Result<(), CommandError> {
     let path = requested_vault_path(path)?;
+    let _pin_guard = state.pin_state_lock.lock().map_err(|_| CommandError {
+        code: "pin_state_unavailable",
+        message: "PIN state is unavailable".to_owned(),
+    })?;
     let mut verification = Vault::new();
     verification.open(&path, &password)?;
     verification.lock();
-    QuickUnlockStore.save(&path, &password).map_err(Into::into)
+    QuickUnlockStore.save(&path, &password)?;
+    if let Err(error) = PinUnlockStore.configure(&path, &pin) {
+        let _ = QuickUnlockStore.remove(&path);
+        return Err(error.into());
+    }
+    Ok(())
 }
 
 #[tauri::command]
-fn disable_quick_unlock(path: Option<String>) -> Result<(), CommandError> {
-    QuickUnlockStore
-        .remove(&requested_vault_path(path)?)
-        .map_err(Into::into)
+fn disable_pin_unlock(
+    path: Option<String>,
+    state: State<'_, AppState>,
+) -> Result<(), CommandError> {
+    let path = requested_vault_path(path)?;
+    let _pin_guard = state.pin_state_lock.lock().map_err(|_| CommandError {
+        code: "pin_state_unavailable",
+        message: "PIN state is unavailable".to_owned(),
+    })?;
+    PinUnlockStore.remove(&path)?;
+    QuickUnlockStore.remove(&path).map_err(Into::into)
 }
 
 #[tauri::command]
@@ -390,14 +423,19 @@ fn change_vault_password(
     new_password: String,
     state: State<'_, AppState>,
 ) -> Result<(), CommandError> {
+    let _pin_guard = state.pin_state_lock.lock().map_err(|_| CommandError {
+        code: "pin_state_unavailable",
+        message: "PIN state is unavailable".to_owned(),
+    })?;
     let mut vault = state.vault.lock().map_err(|_| CommandError {
         code: "vault_state_unavailable",
         message: "Vault state is unavailable".to_owned(),
     })?;
     let path = PathBuf::from(vault.info()?.path);
-    let had_quick_unlock = QuickUnlockStore.load(&path).is_ok();
+    let had_pin_unlock = PinUnlockStore.status(&path).configured;
     vault.change_password(&current_password, &new_password)?;
-    if had_quick_unlock && QuickUnlockStore.save(&path, &new_password).is_err() {
+    if had_pin_unlock && QuickUnlockStore.save(&path, &new_password).is_err() {
+        let _ = PinUnlockStore.remove(&path);
         let _ = QuickUnlockStore.remove(&path);
     }
     Ok(())
@@ -960,6 +998,7 @@ mod tests {
                 pid: 0,
             },
             vault: Arc::new(Mutex::new(vault)),
+            pin_state_lock: Arc::new(Mutex::new(())),
         };
         (directory, state, entry.summary.id)
     }
@@ -1012,15 +1051,17 @@ pub fn run() {
             },
         ))
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_process::init())
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .invoke_handler(tauri::generate_handler![
             browser_integration_status,
             install_browser_integration,
             vault_status,
             create_vault,
             unlock_vault,
-            quick_unlock_vault,
-            enable_quick_unlock,
-            disable_quick_unlock,
+            pin_unlock_vault,
+            enable_pin_unlock,
+            disable_pin_unlock,
             change_vault_password,
             lock_vault,
             list_vault_entries,

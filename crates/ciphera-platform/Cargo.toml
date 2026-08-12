@@ -7,6 +7,10 @@ rust-version.workspace = true
 license.workspace = true
 
 [dependencies]
+argon2 = "0.5"
+rand = "0.9"
+serde.workspace = true
+serde_json.workspace = true
 keyring = "=4.1.6"
 sha2 = "0.11"
 thiserror.workspace = true

@@ -12,6 +12,7 @@ dist
 dist-ssr
 *.local
 target
+packaging/arch/*.pkg.tar.*
 
 # Local secrets and vault data
 .env
@@ -19,6 +20,8 @@ target
 !.env.example
 *.kdbx
 *.kdbx.bak*
+.tauri/keys/
+docs/PROJECT_HANDOFF.md
 
 # Editor directories and files
 .vscode/*
