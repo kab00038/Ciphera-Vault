@@ -4,7 +4,7 @@ version = "0.1.0"
 description = "Offline-first password manager with optional browser integration"
 authors = ["Ciphera contributors"]
 license.workspace = true
-repository = ""
+repository = "https://github.com/kab00038/Ciphera-Vault"
 edition.workspace = true
 rust-version.workspace = true
 

@@ -68,6 +68,14 @@ npm run desktop:build
 npm run desktop:bundle:linux
 ```
 
+Every branch push and pull request runs `.github/workflows/package.yml`. After verification, GitHub Actions builds downloadable workflow artifacts for:
+
+- Linux x86_64: AppImage, Debian package, and RPM package
+- Windows x86_64: NSIS installer and MSI installer
+- macOS: separate DMG images for Apple Silicon and Intel
+
+These CI artifacts are unsigned development builds. Public distribution should use a Windows code-signing certificate and an Apple Developer ID certificate with Apple notarization; otherwise Windows SmartScreen and macOS Gatekeeper may warn or block users.
+
 The real interoperability test is ignored by default because it requires an independent KeePassXC executable:
 
 ```bash
