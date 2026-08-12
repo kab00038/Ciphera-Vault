@@ -122,12 +122,12 @@ jobs:
       - name: Build pacman package
         run: |
           useradd --create-home builder
-          chown -R builder:builder \"$GITHUB_WORKSPACE\"
-          runuser -u builder -- ./packaging/arch/build-package.sh
+          chown -R builder:builder "$GITHUB_WORKSPACE"
+          runuser --user builder -- env HOME=/home/builder ./packaging/arch/build-package.sh
 
       - name: Upload package to draft release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          tag=\"v$(node -p \"require('./package.json').version\")\"
-          gh release upload \"$tag\" packaging/arch/*.pkg.tar.zst --clobber
+          tag="v$(node -p "require('./package.json').version")"
+          gh release upload "$tag" packaging/arch/*.pkg.tar.zst --clobber
