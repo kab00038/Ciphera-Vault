@@ -5,6 +5,11 @@ on:
     tags:
       - "v[0-9]+.[0-9]+.[0-9]+"
   workflow_dispatch:
+    inputs:
+      release_tag:
+        description: Existing version tag to build and publish
+        required: true
+        type: string
 
 permissions:
   contents: write
@@ -13,8 +18,12 @@ jobs:
   verify:
     name: Verify release source
     runs-on: ubuntu-22.04
+    outputs:
+      tag: ${{ steps.release-version.outputs.tag }}
     steps:
       - uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.release_tag || github.ref }}
 
       - name: Install Linux dependencies
         run: |
@@ -36,9 +45,18 @@ jobs:
           workspaces: "./ -> target"
 
       - run: npm ci
-      - name: Match tag to application version
-        if: startsWith(github.ref, 'refs/tags/')
-        run: test "$GITHUB_REF_NAME" = "v$(jq -r .version src-tauri/tauri.conf.json)"
+      - name: Resolve and verify release version
+        id: release-version
+        env:
+          REQUESTED_TAG: ${{ inputs.release_tag }}
+        run: |
+          tag="v$(node -p "require('./src-tauri/tauri.conf.json').version")"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          if [[ -n "$REQUESTED_TAG" ]]; then
+            test "$REQUESTED_TAG" = "$tag"
+          elif [[ "$GITHUB_REF" == refs/tags/* ]]; then
+            test "$GITHUB_REF_NAME" = "$tag"
+          fi
       - run: npm run lint
       - run: npm run build
       - run: cargo test --workspace --locked
@@ -66,6 +84,8 @@ jobs:
     runs-on: ${{ matrix.platform }}
     steps:
       - uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.release_tag || github.ref }}
 
       - name: Install Linux dependencies
         if: matrix.platform == 'ubuntu-22.04'
@@ -115,6 +135,8 @@ jobs:
     container: archlinux:base-devel
     steps:
       - uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.release_tag || github.ref }}
 
       - name: Install Arch build dependencies
         run: pacman -Syu --noconfirm git github-cli gtk3 nodejs npm rust webkit2gtk-4.1
@@ -128,6 +150,18 @@ jobs:
       - name: Upload package to draft release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          tag="v$(node -p "require('./package.json').version")"
-          gh release upload "$tag" packaging/arch/*.pkg.tar.zst --clobber --repo "$GITHUB_REPOSITORY"
+          RELEASE_TAG: ${{ needs.verify.outputs.tag }}
+        run: gh release upload "$RELEASE_TAG" packaging/arch/*.pkg.tar.zst --clobber --repo "$GITHUB_REPOSITORY"
+
+  finalize:
+    name: Publish completed release
+    needs:
+      - verify
+      - publish-arch
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Publish draft release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_TAG: ${{ needs.verify.outputs.tag }}
+        run: gh release edit "$RELEASE_TAG" --draft=false --latest --repo "$GITHUB_REPOSITORY"
