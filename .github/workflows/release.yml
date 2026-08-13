@@ -130,4 +130,4 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           tag="v$(node -p "require('./package.json').version")"
-          gh release upload "$tag" packaging/arch/*.pkg.tar.zst --clobber
+          gh release upload "$tag" packaging/arch/*.pkg.tar.zst --clobber --repo "$GITHUB_REPOSITORY"
