@@ -3,7 +3,9 @@ use ciphera_platform::{PinUnlockStatus, PinUnlockStore, QuickUnlockStore, Secure
 use rand::RngCore;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use sha1::{Digest, Sha1};
 use std::{
+    collections::{BTreeMap, HashMap},
     fs,
     io::{self, BufRead, BufReader, Read, Write},
     net::{TcpListener, TcpStream},
@@ -12,10 +14,17 @@ use std::{
     thread,
     time::Duration,
 };
+#[cfg(any(target_os = "windows", target_os = "linux"))]
+use tauri::{
+    menu::{Menu, MenuItem},
+    tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
+};
 use tauri::{AppHandle, Manager, State};
+use zeroize::Zeroize;
 
 const NATIVE_HOST_NAME: &str = "com.ciphera.browser";
 const EXTENSION_ID: &str = "nbnpilplfaaigikkigfoeolljlpgknbg";
+const FIREFOX_EXTENSION_ID: &str = "ciphera@kab00038.github.io";
 const MAX_NATIVE_MESSAGE_SIZE: usize = 1024 * 1024;
 
 #[derive(Clone)]
@@ -51,8 +60,24 @@ enum BrowserRequest {
 #[serde(rename_all = "camelCase")]
 struct InstallResult {
     extension_id: &'static str,
+    firefox_extension_id: &'static str,
     extension_directory: String,
+    firefox_extension_directory: String,
     installed_manifests: Vec<String>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct BreachMatch {
+    id: String,
+    exposure_count: u64,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct BreachCheckResult {
+    checked_passwords: usize,
+    breached_entries: Vec<BreachMatch>,
 }
 
 #[derive(Serialize)]
@@ -768,6 +793,102 @@ fn vault_totp_codes(state: State<'_, AppState>) -> Result<Value, CommandError> {
     })
 }
 
+fn password_sha1_hex(password: &str) -> String {
+    const HEX: &[u8; 16] = b"0123456789ABCDEF";
+    let digest = Sha1::digest(password.as_bytes());
+    let mut output = String::with_capacity(40);
+    for byte in digest {
+        output.push(char::from(HEX[usize::from(byte >> 4)]));
+        output.push(char::from(HEX[usize::from(byte & 0x0f)]));
+    }
+    output
+}
+
+fn parse_breach_range(body: &str) -> HashMap<String, u64> {
+    body.lines()
+        .filter_map(|line| {
+            let (suffix, count) = line.trim().split_once(':')?;
+            let count = count.parse::<u64>().ok()?;
+            (count > 0).then(|| (suffix.to_ascii_uppercase(), count))
+        })
+        .collect()
+}
+
+#[tauri::command]
+async fn check_breached_passwords(state: State<'_, AppState>) -> Result<Value, CommandError> {
+    let ranges = {
+        let vault = state.vault.lock().map_err(|_| CommandError {
+            code: "vault_state_unavailable",
+            message: "Vault state is unavailable".to_owned(),
+        })?;
+        let entries = vault.list_entries(None)?;
+        let mut ranges: BTreeMap<String, Vec<(String, String)>> = BTreeMap::new();
+        for entry in entries {
+            let mut password = vault.get_entry(&entry.id)?.password;
+            if password.is_empty() {
+                continue;
+            }
+            let hash = password_sha1_hex(&password);
+            password.zeroize();
+            ranges
+                .entry(hash[..5].to_owned())
+                .or_default()
+                .push((entry.id, hash[5..].to_owned()));
+        }
+        ranges
+    };
+
+    let checked_passwords = ranges.values().map(Vec::len).sum();
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(20))
+        .build()
+        .map_err(|error| CommandError {
+            code: "breach_check_failed",
+            message: error.to_string(),
+        })?;
+    let mut breached_entries = Vec::new();
+    for (prefix, candidates) in ranges {
+        let body = client
+            .get(format!("https://api.pwnedpasswords.com/range/{prefix}"))
+            .header(
+                reqwest::header::USER_AGENT,
+                "Ciphera password breach monitor",
+            )
+            .header("Add-Padding", "true")
+            .send()
+            .await
+            .and_then(reqwest::Response::error_for_status)
+            .map_err(|error| CommandError {
+                code: "breach_check_failed",
+                message: format!("Could not query the password breach service: {error}"),
+            })?
+            .text()
+            .await
+            .map_err(|error| CommandError {
+                code: "breach_check_failed",
+                message: format!("Could not read the password breach response: {error}"),
+            })?;
+        let matches = parse_breach_range(&body);
+        for (id, suffix) in candidates {
+            if let Some(exposure_count) = matches.get(&suffix) {
+                breached_entries.push(BreachMatch {
+                    id,
+                    exposure_count: *exposure_count,
+                });
+            }
+        }
+    }
+    breached_entries.sort_by(|left, right| left.id.cmp(&right.id));
+    serde_json::to_value(BreachCheckResult {
+        checked_passwords,
+        breached_entries,
+    })
+    .map_err(|_| CommandError {
+        code: "serialization_error",
+        message: "Could not serialize password breach results".to_owned(),
+    })
+}
+
 fn copy_directory(source: &Path, destination: &Path) -> Result<(), String> {
     fs::create_dir_all(destination).map_err(|error| error.to_string())?;
     for entry in fs::read_dir(source).map_err(|error| error.to_string())? {
@@ -783,7 +904,7 @@ fn copy_directory(source: &Path, destination: &Path) -> Result<(), String> {
     Ok(())
 }
 
-fn native_manifest_paths() -> Vec<PathBuf> {
+fn chromium_native_manifest_paths() -> Vec<PathBuf> {
     let mut paths = Vec::new();
     #[cfg(target_os = "linux")]
     if let Some(config) = dirs::config_dir() {
@@ -807,30 +928,87 @@ fn native_manifest_paths() -> Vec<PathBuf> {
     paths
 }
 
+fn firefox_native_manifest_paths() -> Vec<PathBuf> {
+    let mut paths = Vec::new();
+    #[cfg(target_os = "linux")]
+    if let Some(home) = dirs::home_dir() {
+        paths.push(home.join(".mozilla/native-messaging-hosts"));
+    }
+    #[cfg(target_os = "macos")]
+    if let Some(home) = dirs::home_dir() {
+        paths.push(home.join("Library/Application Support/Mozilla/NativeMessagingHosts"));
+    }
+    paths
+}
+
+fn firefox_extension_manifest(source: &[u8]) -> Result<Vec<u8>, String> {
+    let mut manifest: Value = serde_json::from_slice(source).map_err(|error| error.to_string())?;
+    let object = manifest
+        .as_object_mut()
+        .ok_or_else(|| "Browser extension manifest must be a JSON object".to_string())?;
+    object.remove("key");
+    object.insert(
+        "browser_specific_settings".to_owned(),
+        json!({ "gecko": { "id": FIREFOX_EXTENSION_ID, "strict_min_version": "109.0" } }),
+    );
+    serde_json::to_vec_pretty(&manifest).map_err(|error| error.to_string())
+}
+
 fn install_browser_files(source: &Path, executable: &Path) -> Result<InstallResult, String> {
-    let extension_directory = bridge_data_directory()?.join("browser-extension");
+    let extension_root = bridge_data_directory()?.join("browser-extensions");
+    let extension_directory = extension_root.join("chromium");
+    let firefox_extension_directory = extension_root.join("firefox");
     copy_directory(source, &extension_directory)?;
-    let manifest = json!({
+    copy_directory(source, &firefox_extension_directory)?;
+    let source_manifest =
+        fs::read(source.join("manifest.json")).map_err(|error| error.to_string())?;
+    write_private_file(
+        &firefox_extension_directory.join("manifest.json"),
+        &firefox_extension_manifest(&source_manifest)?,
+    )?;
+
+    let chromium_manifest = json!({
         "name": NATIVE_HOST_NAME,
         "description": "Secure bridge between the Ciphera browser extension and desktop vault",
         "path": executable,
         "type": "stdio",
         "allowed_origins": [format!("chrome-extension://{EXTENSION_ID}/")]
     });
-    let manifest_bytes = serde_json::to_vec_pretty(&manifest).map_err(|error| error.to_string())?;
+    let firefox_manifest = json!({
+        "name": NATIVE_HOST_NAME,
+        "description": "Secure bridge between the Ciphera browser extension and desktop vault",
+        "path": executable,
+        "type": "stdio",
+        "allowed_extensions": [FIREFOX_EXTENSION_ID]
+    });
+    let chromium_manifest_bytes =
+        serde_json::to_vec_pretty(&chromium_manifest).map_err(|error| error.to_string())?;
+    let firefox_manifest_bytes =
+        serde_json::to_vec_pretty(&firefox_manifest).map_err(|error| error.to_string())?;
     let mut installed_manifests = Vec::new();
-    for directory in native_manifest_paths() {
+    for directory in chromium_native_manifest_paths() {
         let path = directory.join(format!("{NATIVE_HOST_NAME}.json"));
-        write_private_file(&path, &manifest_bytes)?;
+        write_private_file(&path, &chromium_manifest_bytes)?;
+        installed_manifests.push(path.display().to_string());
+    }
+    for directory in firefox_native_manifest_paths() {
+        let path = directory.join(format!("{NATIVE_HOST_NAME}.json"));
+        write_private_file(&path, &firefox_manifest_bytes)?;
         installed_manifests.push(path.display().to_string());
     }
 
     #[cfg(target_os = "windows")]
-    install_windows_native_host(&manifest_bytes, &mut installed_manifests)?;
+    install_windows_native_hosts(
+        &chromium_manifest_bytes,
+        &firefox_manifest_bytes,
+        &mut installed_manifests,
+    )?;
 
     Ok(InstallResult {
         extension_id: EXTENSION_ID,
+        firefox_extension_id: FIREFOX_EXTENSION_ID,
         extension_directory: extension_directory.display().to_string(),
+        firefox_extension_directory: firefox_extension_directory.display().to_string(),
         installed_manifests,
     })
 }
@@ -864,13 +1042,17 @@ pub fn install_browser_host_from_cli() -> Result<(), String> {
 }
 
 #[cfg(target_os = "windows")]
-fn install_windows_native_host(
-    manifest_bytes: &[u8],
+fn install_windows_native_hosts(
+    chromium_manifest_bytes: &[u8],
+    firefox_manifest_bytes: &[u8],
     installed_manifests: &mut Vec<String>,
 ) -> Result<(), String> {
     use winreg::{enums::HKEY_CURRENT_USER, RegKey};
-    let manifest_path = bridge_data_directory()?.join(format!("{NATIVE_HOST_NAME}.json"));
-    write_private_file(&manifest_path, manifest_bytes)?;
+    let data_directory = bridge_data_directory()?;
+    let chromium_manifest_path = data_directory.join(format!("{NATIVE_HOST_NAME}.chromium.json"));
+    let firefox_manifest_path = data_directory.join(format!("{NATIVE_HOST_NAME}.firefox.json"));
+    write_private_file(&chromium_manifest_path, chromium_manifest_bytes)?;
+    write_private_file(&firefox_manifest_path, firefox_manifest_bytes)?;
     let current_user = RegKey::predef(HKEY_CURRENT_USER);
     for browser in [
         "Google\\Chrome",
@@ -882,10 +1064,21 @@ fn install_windows_native_host(
         let (key, _) = current_user
             .create_subkey(key_path)
             .map_err(|error| error.to_string())?;
-        key.set_value("", &manifest_path.display().to_string())
+        key.set_value("", &chromium_manifest_path.display().to_string())
             .map_err(|error| error.to_string())?;
     }
-    installed_manifests.push(manifest_path.display().to_string());
+    let (firefox_key, _) = current_user
+        .create_subkey(format!(
+            "Software\\Mozilla\\NativeMessagingHosts\\{NATIVE_HOST_NAME}"
+        ))
+        .map_err(|error| error.to_string())?;
+    firefox_key
+        .set_value("", &firefox_manifest_path.display().to_string())
+        .map_err(|error| error.to_string())?;
+    installed_manifests.extend([
+        chromium_manifest_path.display().to_string(),
+        firefox_manifest_path.display().to_string(),
+    ]);
     Ok(())
 }
 
@@ -1036,6 +1229,82 @@ mod tests {
         );
         assert_eq!(response["logins"].as_array().map(Vec::len), Some(0));
     }
+
+    #[test]
+    fn firefox_manifest_uses_a_stable_gecko_id_without_chromium_key() {
+        let chromium = br#"{"manifest_version":3,"name":"Ciphera","version":"0.1.0","key":"chromium-key","permissions":["nativeMessaging"]}"#;
+        let firefox: Value = serde_json::from_slice(
+            &firefox_extension_manifest(chromium).expect("build Firefox manifest"),
+        )
+        .expect("parse Firefox manifest");
+        assert!(firefox.get("key").is_none());
+        assert_eq!(
+            firefox["browser_specific_settings"]["gecko"]["id"],
+            FIREFOX_EXTENSION_ID
+        );
+        assert_eq!(firefox["permissions"][0], "nativeMessaging");
+    }
+
+    #[test]
+    fn pwned_password_hash_and_padded_range_are_matched_locally() {
+        assert_eq!(
+            password_sha1_hex("password"),
+            "5BAA61E4C9B93F3F0682250B6CF8331B7EE68FD8"
+        );
+        let matches = parse_breach_range(
+            "61E4C9B93F3F0682250B6CF8331B7EE68FD8:3303003\r\n00000000000000000000000000000000000:0\r\n",
+        );
+        assert_eq!(
+            matches.get("61E4C9B93F3F0682250B6CF8331B7EE68FD8"),
+            Some(&3_303_003)
+        );
+        assert_eq!(matches.len(), 1);
+    }
+}
+
+#[cfg(any(target_os = "windows", target_os = "linux"))]
+fn install_system_tray(app: &mut tauri::App) -> tauri::Result<()> {
+    let show = MenuItem::with_id(app, "show", "Open Ciphera", true, None::<&str>)?;
+    let hide = MenuItem::with_id(app, "hide", "Hide Ciphera", true, None::<&str>)?;
+    let quit = MenuItem::with_id(app, "quit", "Quit Ciphera", true, None::<&str>)?;
+    let menu = Menu::with_items(app, &[&show, &hide, &quit])?;
+    let mut tray = TrayIconBuilder::new()
+        .tooltip("Ciphera")
+        .menu(&menu)
+        .show_menu_on_left_click(false)
+        .on_menu_event(|app, event| match event.id().as_ref() {
+            "show" => {
+                if let Some(window) = app.get_webview_window("main") {
+                    let _ = window.show();
+                    let _ = window.set_focus();
+                }
+            }
+            "hide" => {
+                if let Some(window) = app.get_webview_window("main") {
+                    let _ = window.hide();
+                }
+            }
+            "quit" => app.exit(0),
+            _ => {}
+        })
+        .on_tray_icon_event(|tray, event| {
+            if let TrayIconEvent::Click {
+                button: MouseButton::Left,
+                button_state: MouseButtonState::Up,
+                ..
+            } = event
+            {
+                if let Some(window) = tray.app_handle().get_webview_window("main") {
+                    let _ = window.show();
+                    let _ = window.set_focus();
+                }
+            }
+        });
+    if let Some(icon) = app.default_window_icon() {
+        tray = tray.icon(icon.clone());
+    }
+    tray.build(app)?;
+    Ok(())
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -1050,6 +1319,13 @@ pub fn run() {
                 }
             },
         ))
+        .on_window_event(|window, event| {
+            #[cfg(any(target_os = "windows", target_os = "linux"))]
+            if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                api.prevent_close();
+                let _ = window.hide();
+            }
+        })
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_process::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
@@ -1080,11 +1356,14 @@ pub fn run() {
             add_vault_attachment,
             save_vault_attachment,
             remove_vault_attachment,
-            vault_totp_codes
+            vault_totp_codes,
+            check_breached_passwords
         ])
         .setup(move |app| {
             let state = start_bridge(vault).map_err(io::Error::other)?;
             app.manage(state);
+            #[cfg(any(target_os = "windows", target_os = "linux"))]
+            install_system_tray(app)?;
             if cfg!(debug_assertions) {
                 app.handle().plugin(
                     tauri_plugin_log::Builder::default()

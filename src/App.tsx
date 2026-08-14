@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useState } from 'react'
 import { invoke, isTauri } from '@tauri-apps/api/core'
 import { open, save } from '@tauri-apps/plugin-dialog'
 import { relaunch } from '@tauri-apps/plugin-process'
@@ -103,6 +103,8 @@ function App() {
   const [toast, setToast] = useState('')
   const [sidebarOpen, setSidebarOpen] = useState(false)
   const [theme, setTheme] = useState<Theme>(getInitialTheme)
+  const updater = useUpdateController()
+  const breach = useBreachController(gate === 'open')
 
   useEffect(() => {
     document.documentElement.dataset.theme = theme
@@ -236,55 +238,73 @@ function App() {
       const status = await invoke<VaultStatus>('vault_status', { path: vaultStatus?.path || null })
       setVaultStatus(status)
       setGate('open')
-    }} /><UpdatePrompt /></>
+    }} /><UpdatePrompt controller={updater} /></>
   }
 
   return (
     <div className="app-shell">
-      <Sidebar view={view} navigate={navigate} open={sidebarOpen} onClose={() => setSidebarOpen(false)} />
+      <Sidebar view={view} navigate={navigate} open={sidebarOpen} onClose={() => setSidebarOpen(false)} updateAvailable={Boolean(updater.update)} />
       <main className="main-area">
         <Topbar theme={theme} onTheme={() => setTheme((current) => current === 'light' ? 'dark' : 'light')} onMenu={() => setSidebarOpen(true)} onLock={lock} />
         {view === 'vault' && <VaultView items={filteredItems} selected={selected} detail={selectedDetail} groups={groups} groupFilter={groupFilter} onGroupFilter={setGroupFilter} onManageGroups={() => setGroupsOpen(true)} onSelect={setSelected} query={query} onQuery={setQuery} category={category} onCategory={setCategory} onAdd={() => setEditor('add')} onEdit={() => setEditor('edit')} onDelete={deleteSelected} onCopy={copy} onToggleFavorite={toggleFavorite} onDetailChanged={applyDetail} />}
         {view === 'generator' && <GeneratorView onCopy={copy} />}
-        {view === 'security' && <SecurityView items={vaultItems} onOpenItem={(item) => { setSelected(item); setView('vault') }} />}
+        {view === 'security' && <SecurityView items={vaultItems} breach={breach} onOpenItem={(item) => { setSelected(item); setView('vault') }} />}
         {view === 'two-factor' && <TwoFactorView onCopy={copy} />}
-        {view === 'settings' && <SettingsView onVaultRestored={async () => { await loadItems(); setToast('Previous encrypted vault snapshot restored') }} />}
+        {view === 'settings' && <SettingsView updater={updater} breach={breach} onVaultRestored={async () => { await loadItems(); setToast('Previous encrypted vault snapshot restored') }} />}
       </main>
       {editor && <EntryModal initial={editor === 'edit' ? selectedDetail : null} groups={groups} onClose={() => setEditor(null)} onSave={saveEntry} />}
       {groupsOpen && <GroupManager groups={groups} onClose={() => setGroupsOpen(false)} onChanged={loadItems} />}
       {toast && <div className="toast"><Check size={16} />{toast}</div>}
-      <UpdatePrompt />
+      <UpdatePrompt controller={updater} />
     </div>
   )
 }
 
-function UpdatePrompt() {
+type UpdateController = {
+  update: Update | null
+  state: 'idle' | 'checking' | 'ready' | 'installing' | 'error'
+  progress: number
+  error: string
+  dismissed: boolean
+  checkNow: () => Promise<void>
+  install: () => Promise<void>
+  dismiss: () => void
+}
+
+function useUpdateController(): UpdateController {
   const [update, setUpdate] = useState<Update | null>(null)
-  const [state, setState] = useState<'checking' | 'ready' | 'installing' | 'error'>('checking')
+  const [state, setState] = useState<UpdateController['state']>('idle')
   const [progress, setProgress] = useState(0)
   const [error, setError] = useState('')
+  const [dismissed, setDismissed] = useState(false)
 
-  useEffect(() => {
+  const checkNow = useCallback(async () => {
     if (!isTauri()) return
-    let active = true
-    const timer = window.setTimeout(() => {
-      check().then((available) => {
-        if (!active) return
-        setUpdate(available)
-        setState(available ? 'ready' : 'checking')
-      }).catch(() => {
-        if (active) setState('checking')
-      })
-    }, 2_000)
-    return () => {
-      active = false
-      window.clearTimeout(timer)
+    setState('checking')
+    setError('')
+    try {
+      const available = await check()
+      setUpdate(available)
+      setDismissed(false)
+      setState(available ? 'ready' : 'idle')
+    } catch (cause) {
+      setError(errorMessage(cause))
+      setState('error')
     }
   }, [])
 
-  if (!update || state === 'checking') return null
+  useEffect(() => {
+    if (!isTauri()) return
+    const initial = window.setTimeout(checkNow, 2_000)
+    const recurring = window.setInterval(checkNow, 6 * 60 * 60_000)
+    return () => {
+      window.clearTimeout(initial)
+      window.clearInterval(recurring)
+    }
+  }, [checkNow])
 
-  const install = async () => {
+  const install = useCallback(async () => {
+    if (!update) return
     setState('installing')
     setError('')
     let downloaded = 0
@@ -303,17 +323,72 @@ function UpdatePrompt() {
       setError(errorMessage(cause))
       setState('error')
     }
-  }
+  }, [update])
 
+  return { update, state, progress, error, dismissed, checkNow, install, dismiss: () => setDismissed(true) }
+}
+
+function UpdatePrompt({ controller }: { controller: UpdateController }) {
+  const { update, state, progress, error, dismissed, install, dismiss } = controller
+  if (!update || dismissed) return null
   return <div className="update-prompt" role="status">
     <Download size={21} />
     <div><strong>Ciphera {update.version} is available</strong><span>{state === 'installing' ? `Downloading and verifying… ${progress}%` : error || 'Install the signed update without downloading an installer manually.'}</span></div>
     <button className="secondary-button" onClick={install} disabled={state === 'installing'}>{state === 'installing' ? 'Installing…' : state === 'error' ? 'Retry' : 'Update and restart'}</button>
-    {state !== 'installing' && <button className="icon-button" aria-label="Dismiss update" onClick={() => setUpdate(null)}><X size={17} /></button>}
+    {state !== 'installing' && <button className="icon-button" aria-label="Dismiss update" onClick={dismiss}><X size={17} /></button>}
   </div>
 }
 
-function Sidebar({ view, navigate, open, onClose }: { view: View; navigate: (view: View) => void; open: boolean; onClose: () => void }) {
+type BreachEntry = { id: string; exposureCount: number }
+type BreachResult = { checkedPasswords: number; breachedEntries: BreachEntry[] }
+type BreachController = {
+  enabled: boolean
+  state: 'idle' | 'checking' | 'ready' | 'error'
+  result: BreachResult | null
+  error: string
+  setEnabled: (enabled: boolean) => void
+  checkNow: () => Promise<void>
+}
+
+function useBreachController(unlocked: boolean): BreachController {
+  const [enabled, setEnabledState] = useState(() => localStorage.getItem('ciphera-breach-monitoring') === 'enabled')
+  const [state, setState] = useState<BreachController['state']>('idle')
+  const [result, setResult] = useState<BreachResult | null>(null)
+  const [error, setError] = useState('')
+
+  const checkNow = useCallback(async () => {
+    if (!isTauri() || !unlocked) return
+    setState('checking')
+    setError('')
+    try {
+      setResult(await invoke<BreachResult>('check_breached_passwords'))
+      setState('ready')
+    } catch (cause) {
+      setError(errorMessage(cause))
+      setState('error')
+    }
+  }, [unlocked])
+
+  useEffect(() => {
+    if (!enabled || !unlocked) return
+    checkNow()
+    const recurring = window.setInterval(checkNow, 24 * 60 * 60_000)
+    return () => window.clearInterval(recurring)
+  }, [checkNow, enabled, unlocked])
+
+  const setEnabled = (next: boolean) => {
+    setEnabledState(next)
+    localStorage.setItem('ciphera-breach-monitoring', next ? 'enabled' : 'disabled')
+    if (!next) {
+      setResult(null)
+      setState('idle')
+      setError('')
+    }
+  }
+  return { enabled, state, result, error, setEnabled, checkNow }
+}
+
+function Sidebar({ view, navigate, open, onClose, updateAvailable }: { view: View; navigate: (view: View) => void; open: boolean; onClose: () => void; updateAvailable: boolean }) {
   return (
     <>
       {open && <button className="sidebar-scrim" onClick={onClose} aria-label="Close menu" />}
@@ -329,7 +404,7 @@ function Sidebar({ view, navigate, open, onClose }: { view: View; navigate: (vie
           ))}
         </nav>
         <div className="sidebar-bottom">
-          <button className={view === 'settings' ? 'nav-item active' : 'nav-item'} onClick={() => navigate('settings')}><Settings size={18} />Settings</button>
+          <button className={view === 'settings' ? 'nav-item active' : 'nav-item'} onClick={() => navigate('settings')}><span className="settings-nav-icon"><Settings size={18} />{updateAvailable && <i className="update-dot" />}</span>Settings</button>
           <div className="sync-status"><span><Check size={12} /></span>Saved locally</div>
         </div>
       </aside>
@@ -550,18 +625,24 @@ function Toggle({ label, hint, checked, onChange, wide }: { label: string; hint:
   return <label className={`toggle-row ${wide ? 'wide' : ''}`}><span><strong>{label}</strong><small>{hint}</small></span><input type="checkbox" checked={checked} onChange={(event) => onChange(event.target.checked)} /><i /></label>
 }
 
-function SecurityView({ items, onOpenItem }: { items: VaultItem[]; onOpenItem: (item: VaultItem) => void }) {
-  const risks = items.filter((item) => item.health !== 'safe')
+function SecurityView({ items, breach, onOpenItem }: { items: VaultItem[]; breach: BreachController; onOpenItem: (item: VaultItem) => void }) {
+  const exposureById = new Map(breach.result?.breachedEntries.map((entry) => [entry.id, entry.exposureCount]) || [])
+  const risks = items.filter((item) => item.health !== 'safe' || exposureById.has(item.id))
   const count = (health: VaultItem['health']) => items.filter((item) => item.health === health).length
   const score = items.length ? Math.round((items.length - risks.length) / items.length * 100) : 100
   return <div className="content-page security-page">
-    <div className="page-title-row"><div><p className="eyebrow">LOCAL SECURITY REVIEW</p><h1>Your security posture</h1><p>Offline analysis of weak, reused, and old passwords in this vault.</p></div></div>
-    <section className="score-hero card"><div className="score-ring"><svg viewBox="0 0 120 120"><circle cx="60" cy="60" r="52" /><circle className="progress" cx="60" cy="60" r="52" style={{ strokeDashoffset: 327 - 327 * score / 100 }} /></svg><div><strong>{score}</strong><span>{score >= 80 ? 'Strong' : 'Review'}</span></div></div><div className="score-copy"><h2>{risks.length ? `${risks.length} item${risks.length === 1 ? '' : 's'} need attention` : 'No local password risks detected'}</h2><p>This offline review does not claim breach monitoring. It checks only properties available inside your vault.</p><div className="score-pills"><span><Check size={14} />Runs offline</span><span><Check size={14} />No passwords transmitted</span></div></div></section>
-    <div className="risk-grid"><div className="risk-card"><span className="risk-icon amber"><Activity /></span><div><strong>{count('weak')}</strong><span>Weak passwords</span></div></div><div className="risk-card"><span className="risk-icon violet"><Copy /></span><div><strong>{count('reused')}</strong><span>Reused passwords</span></div></div><div className="risk-card"><span className="risk-icon blue"><Clock3 /></span><div><strong>{count('old')}</strong><span>Old passwords</span></div></div></div>
+    <div className="page-title-row"><div><p className="eyebrow">SECURITY REVIEW</p><h1>Your security posture</h1><p>Local password analysis with optional privacy-preserving breach monitoring.</p></div>{breach.enabled && <button className="secondary-button" disabled={breach.state === 'checking'} onClick={breach.checkNow}><RefreshCw size={15} />{breach.state === 'checking' ? 'Checking…' : 'Check breaches'}</button>}</div>
+    <section className="score-hero card"><div className="score-ring"><svg viewBox="0 0 120 120"><circle cx="60" cy="60" r="52" /><circle className="progress" cx="60" cy="60" r="52" style={{ strokeDashoffset: 327 - 327 * score / 100 }} /></svg><div><strong>{score}</strong><span>{score >= 80 ? 'Strong' : 'Review'}</span></div></div><div className="score-copy"><h2>{risks.length ? `${risks.length} item${risks.length === 1 ? ' needs' : 's need'} attention` : 'No password risks detected'}</h2><p>{breach.enabled ? 'Breach checks send only the first five SHA-1 characters to Pwned Passwords with response padding; matching stays on this device.' : 'Local review checks weak, reused, and old passwords. Enable daily breach monitoring in Settings.'}</p><div className="score-pills"><span><Check size={14} />Local risk analysis</span><span><Check size={14} />Passwords never transmitted</span></div></div></section>
+    <div className="risk-grid"><div className="risk-card"><span className="risk-icon amber"><Activity /></span><div><strong>{count('weak')}</strong><span>Weak passwords</span></div></div><div className="risk-card"><span className="risk-icon violet"><Copy /></span><div><strong>{count('reused')}</strong><span>Reused passwords</span></div></div><div className="risk-card"><span className="risk-icon blue"><Clock3 /></span><div><strong>{count('old')}</strong><span>Old passwords</span></div></div><div className="risk-card"><span className="risk-icon danger"><AlertTriangle /></span><div><strong>{breach.result?.breachedEntries.length ?? '—'}</strong><span>Known breaches</span></div></div></div>
+    {breach.state === 'error' && <p className="form-error">{breach.error}</p>}
     <div className="security-grid">
       <section className="card issues-card"><div className="section-heading"><div><h2>Needs your attention</h2><p>Open an item to update its credentials.</p></div></div>
-        {risks.map((item) => <button className="issue-row" key={item.id} onClick={() => onOpenItem(item)}><ServiceIcon title={item.title} initials={item.initials} color={item.color} /><div><strong>{item.title}</strong><span>{item.health === 'weak' ? 'Password does not meet local strength checks' : item.health === 'reused' ? 'Password is reused in this vault' : 'Password has not changed for over a year'}</span></div><span className={`severity ${item.health}`}>{item.health === 'old' ? 'Review' : 'Fix now'}</span><ChevronRight size={17} /></button>)}
-        {!risks.length && <div className="empty-state"><ShieldCheck size={27} /><strong>No local risks found</strong><span>Keep using a unique password for every account.</span></div>}
+        {risks.map((item) => {
+          const exposureCount = exposureById.get(item.id)
+          const detail = exposureCount ? `Password appears ${exposureCount.toLocaleString()} times in the Pwned Passwords corpus` : item.health === 'weak' ? 'Password does not meet local strength checks' : item.health === 'reused' ? 'Password is reused in this vault' : 'Password has not changed for over a year'
+          return <button className="issue-row" key={item.id} onClick={() => onOpenItem(item)}><ServiceIcon title={item.title} initials={item.initials} color={item.color} /><div><strong>{item.title}</strong><span>{detail}</span></div><span className={`severity ${exposureCount ? 'breached' : item.health}`}>{exposureCount ? 'Change now' : item.health === 'old' ? 'Review' : 'Fix now'}</span><ChevronRight size={17} /></button>
+        })}
+        {!risks.length && <div className="empty-state"><ShieldCheck size={27} /><strong>No risks found</strong><span>Keep using a unique password for every account.</span></div>}
       </section>
     </div>
   </div>
@@ -604,7 +685,7 @@ function TwoFactorView({ onCopy }: { onCopy: (value: string, message?: string) =
   </div>
 }
 
-function SettingsView({ onVaultRestored }: { onVaultRestored: () => Promise<void> }) {
+function SettingsView({ updater, breach, onVaultRestored }: { updater: UpdateController; breach: BreachController; onVaultRestored: () => Promise<void> }) {
   const [status, setStatus] = useState<VaultStatus | null>(null)
   const [pinPassword, setPinPassword] = useState('')
   const [pin, setPin] = useState('')
@@ -642,7 +723,7 @@ function SettingsView({ onVaultRestored }: { onVaultRestored: () => Promise<void
       setError('PINs do not match')
       return
     }
-    if (!/^(?:\\d{4}|\\d{6})$/.test(pin)) {
+    if (!/^(?:\d{4}|\d{6})$/.test(pin)) {
       setError('PIN must contain exactly 4 or 6 digits')
       return
     }
@@ -695,6 +776,8 @@ function SettingsView({ onVaultRestored }: { onVaultRestored: () => Promise<void
         <div className="setting-row"><span className="setting-icon"><Clipboard size={19} /></span><div><strong>Clear clipboard</strong><span>Copied secrets clear after 60 seconds</span></div><BadgeCheck size={18} /></div>
         <div className="setting-row"><span className="setting-icon"><Fingerprint size={19} /></span><div><strong>PIN quick unlock</strong><span>{status?.pinUnlock.configured ? status.pinUnlock.masterPasswordRequired ? 'Master password required after too many failed PIN attempts' : `Protected by the OS credential vault · ${status.pinUnlock.attemptsRemaining} attempts available` : 'Not configured on this device'}</span></div>{status?.pinUnlock.configured ? <button className="text-button" onClick={disablePinUnlock}>Disable</button> : <button className="text-button" onClick={() => setPinOpen(true)}>Enable</button>}</div>
         <div className="setting-row"><span className="setting-icon"><KeyRound size={19} /></span><div><strong>Master password</strong><span>Re-encrypt the vault with a new master password</span></div><button className="text-button" onClick={() => setPasswordOpen(true)}>Change</button></div>
+        <div className="setting-row"><span className="setting-icon"><RefreshCw size={19} /></span><div><strong>Application updates</strong><span>{updater.update ? `Ciphera ${updater.update.version} is ready to install` : updater.state === 'checking' ? 'Checking GitHub Releases…' : updater.state === 'error' ? updater.error : 'Ciphera checks automatically every six hours'}</span></div>{updater.update ? <button className="text-button" disabled={updater.state === 'installing'} onClick={updater.install}>{updater.state === 'installing' ? `${updater.progress}%` : 'Update'}</button> : <button className="text-button" disabled={updater.state === 'checking'} onClick={updater.checkNow}>Check now</button>}</div>
+        <div className="setting-row"><span className="setting-icon"><ShieldCheck size={19} /></span><div><strong>Daily password breach check</strong><span>{breach.enabled ? breach.state === 'checking' ? 'Checking password hash prefixes…' : breach.state === 'error' ? breach.error : 'Enabled · checks at launch and every 24 hours while Ciphera is open' : 'Disabled · enabling sends five-character hash prefixes to Pwned Passwords'}</span></div><button className="text-button" onClick={() => breach.setEnabled(!breach.enabled)}>{breach.enabled ? 'Disable' : 'Enable'}</button></div>
       </section>
       <aside className="card encryption-card">
         <div className="encryption-orbit"><Lock size={29} /></div><h3>Local KDBX 4.1 encryption</h3><p>Your vault file is encrypted on this device. Browser filling is served only by the unlocked native process.</p>
@@ -721,6 +804,7 @@ function BrowserIntegrationCard() {
   const [state, setState] = useState<'loading' | 'ready' | 'installed' | 'error'>(desktop ? 'loading' : 'error')
   const [detail, setDetail] = useState(desktop ? 'Checking the native messaging bridge…' : 'Browser integration is available in the standalone desktop app.')
   const [extensionDirectory, setExtensionDirectory] = useState('')
+  const [firefoxExtensionDirectory, setFirefoxExtensionDirectory] = useState('')
 
   useEffect(() => {
     if (!desktop) return
@@ -739,10 +823,11 @@ function BrowserIntegrationCard() {
     setState('loading')
     setDetail('Installing the private native host and extension files…')
     try {
-      const result = await invoke<{ extensionDirectory: string; installedManifests: string[] }>('install_browser_integration')
+      const result = await invoke<{ extensionDirectory: string; firefoxExtensionDirectory: string; installedManifests: string[] }>('install_browser_integration')
       setExtensionDirectory(result.extensionDirectory)
+      setFirefoxExtensionDirectory(result.firefoxExtensionDirectory)
       setState('installed')
-      setDetail(`Registered with ${result.installedManifests.length} Chromium browser profiles.`)
+      setDetail(`Registered ${result.installedManifests.length} native browser manifests.`)
     } catch (cause) {
       setState('error')
       setDetail(cause instanceof Error ? cause.message : String(cause))
@@ -754,7 +839,7 @@ function BrowserIntegrationCard() {
     <div className="browser-copy">
       <div className="section-heading"><div><span className="new-badge">DESKTOP INTEGRATION</span><h2>Browser extension</h2><p>Fill logins through an authenticated local bridge. Vault data never passes through a web server.</p></div><span className={`integration-state ${state}`}><i />{state === 'installed' ? 'Installed' : state === 'ready' ? 'Bridge ready' : state === 'loading' ? 'Working' : desktop ? 'Needs attention' : 'Desktop only'}</span></div>
       <div className="bridge-detail"><ShieldCheck size={16} /><span>{detail}</span></div>
-      {extensionDirectory && <div className="extension-path"><FolderOpen size={15} /><code>{extensionDirectory}</code><span>Load this folder as an unpacked extension.</span></div>}
+      {extensionDirectory && <><div className="extension-path"><FolderOpen size={15} /><code>{extensionDirectory}</code><span>Chromium: load this folder as an unpacked extension.</span></div><div className="extension-path"><FolderOpen size={15} /><code>{firefoxExtensionDirectory}</code><span>Firefox: load this folder from about:debugging → This Firefox.</span></div></>}
     </div>
     <button className="primary-button install-extension" disabled={!desktop || state === 'loading'} onClick={install}>{state === 'installed' ? 'Reinstall files' : 'Install extension'}</button>
   </section>
@@ -796,6 +881,18 @@ function EntryModal({ initial, groups, onClose, onSave }: { initial: EntryDetail
     {error && <p className="form-error">{error}</p>}
     <button className="primary-button modal-save" disabled={saving}>{saving ? 'Saving…' : initial ? 'Save changes' : 'Encrypt and save'}</button>
   </form></div>
+}
+
+function PinDialPad({ value, onChange, disabled }: { value: string; onChange: (value: string) => void; disabled: boolean }) {
+  const append = (digit: string) => {
+    if (!disabled && value.length < 6) onChange(`${value}${digit}`)
+  }
+  return <div className="pin-dial-pad" aria-label="PIN keypad">
+    {['1', '2', '3', '4', '5', '6', '7', '8', '9'].map((digit) => <button type="button" key={digit} disabled={disabled} onClick={() => append(digit)}>{digit}</button>)}
+    <button type="button" className="pin-clear" disabled={disabled || !value} onClick={() => onChange('')}>Clear</button>
+    <button type="button" disabled={disabled} onClick={() => append('0')}>0</button>
+    <button type="button" className="pin-backspace" aria-label="Delete last PIN digit" disabled={disabled || !value} onClick={() => onChange(value.slice(0, -1))}>⌫</button>
+  </div>
 }
 
 function VaultGate({ mode, status, onOpen }: { mode: 'loading' | 'create' | 'unlock' | 'desktop'; status: VaultStatus | null; onOpen: () => Promise<void> }) {
@@ -866,7 +963,7 @@ function VaultGate({ mode, status, onOpen }: { mode: 'loading' | 'create' | 'unl
   }
   return <div className="lock-screen"><form className="lock-card vault-gate" onSubmit={submit}><div className="brand-mark large-mark"><ShieldCheck size={28} /></div><h1>{create ? 'Create your vault' : 'Welcome back'}</h1><p>{create ? 'Choose a master password. Ciphera cannot recover it.' : 'Unlock your encrypted local KDBX vault.'}</p>
     <label>VAULT FILE<div className="path-picker"><input value={path} onChange={(event) => setPath(event.target.value)} placeholder="/path/to/vault.kdbx" /><button type="button" onClick={chooseVaultFile}><FolderOpen size={17} />Browse</button></div></label>
-    {!create && pinStatus?.configured && !pinStatus.masterPasswordRequired && <div className="pin-unlock-panel"><label>QUICK-UNLOCK PIN<input type="password" inputMode="numeric" pattern="(?:[0-9]{4}|[0-9]{6})" value={pin} onChange={(event) => setPin(event.target.value.replace(/\D/g, '').slice(0, 6))} onKeyDown={(event) => { if (event.key === 'Enter' && (pin.length === 4 || pin.length === 6)) { event.preventDefault(); unlockWithPin() } }} autoFocus autoComplete="current-password" /></label><button type="button" className="biometric-button" disabled={working || ![4, 6].includes(pin.length)} onClick={unlockWithPin}><Fingerprint size={22} />{working ? 'Working…' : 'Unlock with PIN'}</button><span>{pinStatus.attemptsRemaining} attempts remaining{pinStatus.retryAfterSeconds ? ` · wait ${pinStatus.retryAfterSeconds}s` : ''}</span><div className="gate-divider">or use your master password</div></div>}
+    {!create && pinStatus?.configured && !pinStatus.masterPasswordRequired && <div className="pin-unlock-panel"><label>QUICK-UNLOCK PIN<input type="password" inputMode="numeric" pattern="(?:[0-9]{4}|[0-9]{6})" value={pin} onChange={(event) => setPin(event.target.value.replace(/\D/g, '').slice(0, 6))} onKeyDown={(event) => { if (event.key === 'Enter' && (pin.length === 4 || pin.length === 6)) { event.preventDefault(); unlockWithPin() } }} autoFocus autoComplete="current-password" /></label><PinDialPad value={pin} onChange={setPin} disabled={working} /><button type="button" className="biometric-button" disabled={working || ![4, 6].includes(pin.length)} onClick={unlockWithPin}><Fingerprint size={22} />{working ? 'Working…' : 'Unlock with PIN'}</button><span>{pinStatus.attemptsRemaining} attempts remaining{pinStatus.retryAfterSeconds ? ` · wait ${pinStatus.retryAfterSeconds}s` : ''}</span><div className="gate-divider">or use your master password</div></div>}
     {!create && pinStatus?.masterPasswordRequired && <p className="pin-master-required"><AlertTriangle size={16} />Too many failed PIN attempts. Unlock once with your master password to re-enable the PIN.</p>}
     <label>MASTER PASSWORD<input type="password" value={password} onChange={(event) => setPassword(event.target.value)} autoFocus={create || !pinStatus?.configured || pinStatus.masterPasswordRequired} autoComplete={create ? 'new-password' : 'current-password'} required /></label>
     {create && <label>CONFIRM PASSWORD<input type="password" value={confirmPassword} onChange={(event) => setConfirmPassword(event.target.value)} autoComplete="new-password" required /></label>}
