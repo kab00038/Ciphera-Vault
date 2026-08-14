@@ -21,7 +21,7 @@ packaging/arch/*.pkg.tar.*
 *.kdbx
 *.kdbx.bak*
 .tauri/keys/
-docs/PROJECT_HANDOFF.md
+.local-docs/
 
 # Editor directories and files
 .vscode/*
