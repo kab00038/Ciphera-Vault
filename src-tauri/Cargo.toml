@@ -1,6 +1,6 @@
 [package]
 name = "ciphera"
-version = "0.1.0"
+version = "0.1.1"
 description = "Offline-first password manager with optional browser integration"
 authors = ["Ciphera contributors"]
 license.workspace = true

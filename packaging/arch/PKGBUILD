@@ -1,5 +1,5 @@
 pkgname=ciphera
-pkgver=0.1.0
+pkgver=0.1.1
 pkgrel=1
 pkgdesc='Offline-first password manager with optional browser integration'
 arch=('x86_64')
