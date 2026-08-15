@@ -22,6 +22,40 @@ fail() {
   printf '\nCiphera installer: %s\n' "$1" >&2
   exit 1
 }
+write_desktop_entry() {
+  local path="$1"
+  local executable="$2"
+  cat >"$path" <<EOF
+[Desktop Entry]
+Type=Application
+Name=Ciphera
+Comment=Offline-first password manager
+Exec="$executable"
+Icon=ciphera
+Terminal=false
+StartupNotify=true
+StartupWMClass=ciphera
+Categories=Utility;Security;
+Keywords=password;vault;security;KDBX;
+EOF
+}
+
+repair_malformed_kde_launcher() {
+  local executable="$1"
+  local launcher="${XDG_DATA_HOME:-$HOME/.local/share}/applications/Ciphera.desktop"
+  local line
+  [[ -f "$launcher" ]] || return 0
+  while IFS= read -r line; do
+    case "${line,,}" in
+      exec=*ciphera.desktop*)
+        write_desktop_entry "$launcher" "$executable"
+        printf '%s\n' "Repaired the malformed KDE Ciphera application-menu entry."
+        return 0
+        ;;
+    esac
+  done <"$launcher"
+}
+
 
 command -v curl >/dev/null 2>&1 || fail "curl is required"
 command -v python3 >/dev/null 2>&1 || fail "python3 is required to verify release metadata"
@@ -141,21 +175,17 @@ case "$package_kind" in
     mkdir -p "$install_dir" "$bin_dir" "$desktop_dir"
     install -m 0755 "$download" "$install_dir/Ciphera.AppImage"
     ln -sfn "$install_dir/Ciphera.AppImage" "$bin_dir/ciphera"
-    cat >"$desktop_dir/ciphera.desktop" <<EOF
-[Desktop Entry]
-Name=Ciphera
-Comment=Offline-first password manager
-Exec=$install_dir/Ciphera.AppImage
-Terminal=false
-Type=Application
-Categories=Utility;Security;
-EOF
+    write_desktop_entry "$desktop_dir/Ciphera.desktop" "$install_dir/Ciphera.AppImage"
     printf '%s\n' "Installed the AppImage at $install_dir/Ciphera.AppImage"
     if [[ ":$PATH:" != *":$bin_dir:"* ]]; then
       printf '%s\n' "Add $bin_dir to PATH to run Ciphera as: ciphera"
     fi
     ;;
 esac
+
+if [[ "$package_kind" != "appimage" ]]; then
+  repair_malformed_kde_launcher "/usr/bin/ciphera"
+fi
 
 printf '\n%bCiphera is installed.%b Launch it from your application menu.\n' "$GREEN" "$RESET"
 printf '%s\n' "After launch, open Settings > Browser extension to install the bundled Chromium and Firefox files."

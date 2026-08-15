@@ -2,9 +2,10 @@
 Type=Application
 Name=Ciphera
 Comment=Offline-first password manager with optional browser integration
-Exec=ciphera
+Exec=/usr/bin/ciphera
 Icon=ciphera
 Terminal=false
+StartupNotify=true
 StartupWMClass=ciphera
 Categories=Utility;Security;
 Keywords=password;vault;security;KDBX;

@@ -11,10 +11,7 @@ fn main() {
             eprintln!("{error}");
             std::process::exit(1);
         }
-    } else if arguments
-        .iter()
-        .any(|argument| argument == "--native-host" || argument.starts_with("chrome-extension://"))
-    {
+    } else if app_lib::is_native_host_invocation(&arguments) {
         app_lib::run_native_host();
     } else {
         app_lib::run();

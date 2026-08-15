@@ -94,6 +94,8 @@ chmod +x ./Ciphera_*_amd64.AppImage
 
 The AppImage is portable and does not require installation. Move it to a stable location before enabling automatic updates.
 
+On KDE, launch the installed **Ciphera** application entry rather than creating a launcher whose executable is another `.desktop` file. The Linux installer repairs that malformed launcher pattern automatically. The packaged launcher executes Ciphera directly.
+
 ## First launch
 
 Choose **Create a new vault** or open an existing KDBX file. On Linux, the default new-vault location is:
@@ -108,7 +110,7 @@ Optional PIN quick unlock stores its protected credential and PIN verifier in th
 
 ## Browser extension
 
-In Ciphera, open **Settings → Browser extension** and install the native host. The app displays separate bundled-extension paths for Chromium browsers and Firefox. Follow the on-screen browser instructions for the path you use. Browser filling requires Ciphera to be running with the vault unlocked and only occurs after an explicit user action.
+In Ciphera, open **Settings → Browser extension** and select **Install extension**. For Chrome, Chromium, Brave, or Edge, enable developer mode on the browser's extensions page and load the displayed Chromium directory as an unpacked extension. For Firefox, open `about:debugging#/runtime/this-firefox`, choose **Load Temporary Add-on**, and select `manifest.json` from the displayed Firefox directory. Browser filling requires Ciphera to remain running with the vault unlocked and only occurs after an explicit user action.
 
 ## Updates
 

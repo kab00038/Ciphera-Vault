@@ -26,6 +26,13 @@ const NATIVE_HOST_NAME: &str = "com.ciphera.browser";
 const EXTENSION_ID: &str = "nbnpilplfaaigikkigfoeolljlpgknbg";
 const FIREFOX_EXTENSION_ID: &str = "ciphera@kab00038.github.io";
 const MAX_NATIVE_MESSAGE_SIZE: usize = 1024 * 1024;
+const REQUIRED_EXTENSION_FILES: [&str; 5] = [
+    "manifest.json",
+    "popup.html",
+    "popup.css",
+    "popup.js",
+    "content.js",
+];
 
 #[derive(Clone)]
 struct AppState {
@@ -904,6 +911,74 @@ fn copy_directory(source: &Path, destination: &Path) -> Result<(), String> {
     Ok(())
 }
 
+fn replace_directory_contents(source: &Path, destination: &Path) -> Result<(), String> {
+    if destination.exists() {
+        fs::remove_dir_all(destination).map_err(|error| error.to_string())?;
+    }
+    copy_directory(source, destination)
+}
+
+fn validate_extension_source(source: &Path) -> Result<(), String> {
+    for file in REQUIRED_EXTENSION_FILES {
+        let path = source.join(file);
+        if !path.is_file() {
+            return Err(format!(
+                "Browser extension source is missing required file: {}",
+                path.display()
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn resolve_extension_source(
+    resource_directory: &Path,
+    development_extension: &Path,
+) -> Result<PathBuf, String> {
+    let canonical = resource_directory.join("extension");
+    if canonical.exists() {
+        validate_extension_source(&canonical)?;
+        return Ok(canonical);
+    }
+
+    let legacy = resource_directory.join("_up_/extension");
+    if legacy.exists() {
+        validate_extension_source(&legacy)?;
+        return Ok(legacy);
+    }
+
+    validate_extension_source(development_extension)?;
+    Ok(development_extension.to_path_buf())
+}
+
+fn resolve_native_host_executable<F>(
+    appimage: Option<&std::ffi::OsStr>,
+    current_executable: F,
+) -> Result<PathBuf, String>
+where
+    F: FnOnce() -> io::Result<PathBuf>,
+{
+    if let Some(path) = appimage.map(PathBuf::from) {
+        if path.is_absolute() && path.is_file() {
+            return Ok(path);
+        }
+    }
+    current_executable().map_err(|error| error.to_string())
+}
+
+fn native_host_executable() -> Result<PathBuf, String> {
+    let appimage = std::env::var_os("APPIMAGE");
+    resolve_native_host_executable(appimage.as_deref(), std::env::current_exe)
+}
+
+pub fn is_native_host_invocation(arguments: &[String]) -> bool {
+    arguments.iter().any(|argument| {
+        argument == "--native-host"
+            || argument.starts_with("chrome-extension://")
+            || argument == FIREFOX_EXTENSION_ID
+    })
+}
+
 fn chromium_native_manifest_paths() -> Vec<PathBuf> {
     let mut paths = Vec::new();
     #[cfg(target_os = "linux")]
@@ -912,6 +987,9 @@ fn chromium_native_manifest_paths() -> Vec<PathBuf> {
             config.join("chromium/NativeMessagingHosts"),
             config.join("google-chrome/NativeMessagingHosts"),
             config.join("BraveSoftware/Brave-Browser/NativeMessagingHosts"),
+            config.join("BraveSoftware/Brave-Browser-Beta/NativeMessagingHosts"),
+            config.join("BraveSoftware/Brave-Browser-Nightly/NativeMessagingHosts"),
+            config.join("BraveSoftware/Brave-Origin/NativeMessagingHosts"),
             config.join("microsoft-edge/NativeMessagingHosts"),
         ]);
     }
@@ -955,16 +1033,18 @@ fn firefox_extension_manifest(source: &[u8]) -> Result<Vec<u8>, String> {
 }
 
 fn install_browser_files(source: &Path, executable: &Path) -> Result<InstallResult, String> {
+    validate_extension_source(source)?;
+    let source_manifest =
+        fs::read(source.join("manifest.json")).map_err(|error| error.to_string())?;
+    let firefox_extension_manifest_bytes = firefox_extension_manifest(&source_manifest)?;
     let extension_root = bridge_data_directory()?.join("browser-extensions");
     let extension_directory = extension_root.join("chromium");
     let firefox_extension_directory = extension_root.join("firefox");
-    copy_directory(source, &extension_directory)?;
-    copy_directory(source, &firefox_extension_directory)?;
-    let source_manifest =
-        fs::read(source.join("manifest.json")).map_err(|error| error.to_string())?;
+    replace_directory_contents(source, &extension_directory)?;
+    replace_directory_contents(source, &firefox_extension_directory)?;
     write_private_file(
         &firefox_extension_directory.join("manifest.json"),
-        &firefox_extension_manifest(&source_manifest)?,
+        &firefox_extension_manifest_bytes,
     )?;
 
     let chromium_manifest = json!({
@@ -1015,24 +1095,19 @@ fn install_browser_files(source: &Path, executable: &Path) -> Result<InstallResu
 
 #[tauri::command]
 fn install_browser_integration(app: AppHandle) -> Result<InstallResult, String> {
-    let bundled_extension = app
+    let resource_directory = app
         .path()
         .resource_dir()
-        .map_err(|error| error.to_string())?
-        .join("extension");
+        .map_err(|error| error.to_string())?;
     let development_extension = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../extension");
-    let source = if bundled_extension.exists() {
-        bundled_extension
-    } else {
-        development_extension
-    };
-    let executable = std::env::current_exe().map_err(|error| error.to_string())?;
+    let source = resolve_extension_source(&resource_directory, &development_extension)?;
+    let executable = native_host_executable()?;
     install_browser_files(&source, &executable)
 }
 
 pub fn install_browser_host_from_cli() -> Result<(), String> {
     let source = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../extension");
-    let executable = std::env::current_exe().map_err(|error| error.to_string())?;
+    let executable = native_host_executable()?;
     let result = install_browser_files(&source, &executable)?;
     println!(
         "{}",
@@ -1243,6 +1318,88 @@ mod tests {
             FIREFOX_EXTENSION_ID
         );
         assert_eq!(firefox["permissions"][0], "nativeMessaging");
+    }
+
+    fn write_extension_source(directory: &Path) {
+        fs::create_dir_all(directory).expect("create extension source");
+        for file in REQUIRED_EXTENSION_FILES {
+            fs::write(directory.join(file), b"{}").expect("write extension source file");
+        }
+    }
+
+    #[test]
+    fn extension_source_prefers_canonical_and_accepts_legacy_fallback() {
+        let directory = TempDir::new().expect("temp directory");
+        let resource_directory = directory.path().join("resources");
+        let canonical = resource_directory.join("extension");
+        let legacy = resource_directory.join("_up_/extension");
+        let development = directory.path().join("development");
+        write_extension_source(&canonical);
+        write_extension_source(&legacy);
+        write_extension_source(&development);
+
+        assert_eq!(
+            resolve_extension_source(&resource_directory, &development)
+                .expect("resolve canonical extension"),
+            canonical
+        );
+        fs::remove_dir_all(resource_directory.join("extension")).expect("remove canonical source");
+        assert_eq!(
+            resolve_extension_source(&resource_directory, &development)
+                .expect("resolve legacy extension"),
+            legacy
+        );
+    }
+
+    #[test]
+    fn extension_source_rejects_incomplete_bundled_directory() {
+        let directory = TempDir::new().expect("temp directory");
+        let resource_directory = directory.path().join("resources");
+        let canonical = resource_directory.join("extension");
+        let development = directory.path().join("development");
+        fs::create_dir_all(&canonical).expect("create incomplete source");
+        fs::write(canonical.join("manifest.json"), b"{}").expect("write manifest");
+        write_extension_source(&development);
+
+        let error = resolve_extension_source(&resource_directory, &development)
+            .expect_err("reject incomplete bundled extension");
+        assert!(error.contains("popup.html"));
+    }
+
+    #[test]
+    fn appimage_path_is_used_only_when_it_is_a_persistent_file() {
+        let directory = TempDir::new().expect("temp directory");
+        let appimage = directory.path().join("Ciphera.AppImage");
+        fs::write(&appimage, b"appimage").expect("write AppImage");
+        let fallback = PathBuf::from("/current/ciphera");
+
+        assert_eq!(
+            resolve_native_host_executable(Some(appimage.as_os_str()), || { Ok(fallback.clone()) })
+                .expect("resolve AppImage"),
+            appimage
+        );
+        assert_eq!(
+            resolve_native_host_executable(
+                Some(directory.path().join("missing.AppImage").as_os_str()),
+                || Ok(fallback.clone())
+            )
+            .expect("resolve current executable"),
+            fallback
+        );
+    }
+
+    #[test]
+    fn chrome_and_firefox_native_host_arguments_are_classified() {
+        assert!(is_native_host_invocation(&[
+            "ciphera".to_owned(),
+            format!("chrome-extension://{EXTENSION_ID}/")
+        ]));
+        assert!(is_native_host_invocation(&[
+            "ciphera".to_owned(),
+            "/home/user/.mozilla/native-messaging-hosts/com.ciphera.browser.json".to_owned(),
+            FIREFOX_EXTENSION_ID.to_owned()
+        ]));
+        assert!(!is_native_host_invocation(&["ciphera".to_owned()]));
     }
 
     #[test]
