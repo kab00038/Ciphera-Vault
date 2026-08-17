@@ -65,9 +65,30 @@ jobs:
       - run: npm run build
       - run: cargo test --workspace --locked
 
+  prepare-release:
+    name: Prepare shared draft release
+    needs: verify
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Create draft release once
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_TAG: ${{ needs.verify.outputs.tag }}
+        run: |
+          if gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            exit 0
+          fi
+          gh release create "$RELEASE_TAG" \
+            --draft \
+            --generate-notes \
+            --notes "Download the installer for your platform. Existing installations can update from inside Ciphera." \
+            --title "Ciphera $RELEASE_TAG" \
+            --verify-tag \
+            --repo "$GITHUB_REPOSITORY"
+
   publish:
     name: Publish ${{ matrix.name }}
-    needs: verify
+    needs: prepare-release
     strategy:
       fail-fast: false
       matrix:
@@ -141,7 +162,7 @@ jobs:
 
   build-arch:
     name: Build Arch Linux x86_64
-    needs: verify
+    needs: prepare-release
     runs-on: ubuntu-22.04
     container: archlinux:base-devel
     steps:
