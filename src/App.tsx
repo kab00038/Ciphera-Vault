@@ -9,7 +9,7 @@ import {
   Eye, EyeOff, Fingerprint, FolderTree, Grid2X2, HardDrive, History,
   KeyRound, LayoutDashboard, Lock, Menu, MoreHorizontal, Paperclip, Pencil,
   Plus, RefreshCw, RotateCcw, Search, Settings, ShieldCheck, Smartphone,
-  Sparkles, Star, Trash2, WandSparkles, WifiOff, X, Puzzle, FolderOpen,
+  Sparkles, Star, Trash2, WandSparkles, WifiOff, X, Puzzle, FolderOpen, FileUp,
   Sun, Moon, type LucideIcon,
 } from 'lucide-react'
 import { siFigma, siGithub, siLinear, siNotion, siProtonmail, siVisa, type SimpleIcon } from 'simple-icons'
@@ -64,6 +64,18 @@ type EntryInput = {
 type TotpCode = { id: string; title: string; username: string; code: string; validFor: number; period: number }
 type PinUnlockStatus = { configured: boolean; attemptsRemaining: number; retryAfterSeconds: number; masterPasswordRequired: boolean }
 type VaultStatus = { path: string; exists: boolean; unlocked: boolean; pinUnlock: PinUnlockStatus }
+type CsvImportIssue = { row: number; message: string }
+type CsvImportPreview = {
+  token: string
+  fileName: string
+  sourceFormat: string
+  totalRows: number
+  importableRows: number
+  duplicateRows: number
+  skippedRows: number
+  issues: CsvImportIssue[]
+}
+type CsvImportResult = { importedRows: number; duplicateRows: number; skippedRows: number }
 
 function decorateItem(item: VaultRecord): VaultItem {
   const colors: Record<string, string> = { GitHub: '#111827', Notion: '#111827', Figma: '#f24e1e', Linear: '#5e6ad2', 'AWS Console': '#ff9900', LinkedIn: '#0a66c2', 'Proton Mail': '#6d4aff' }
@@ -98,6 +110,7 @@ function App() {
   const [groupFilter, setGroupFilter] = useState('')
   const [groupsOpen, setGroupsOpen] = useState(false)
   const [editor, setEditor] = useState<'add' | 'edit' | null>(null)
+  const [importOpen, setImportOpen] = useState(false)
   const [gate, setGate] = useState<'loading' | 'create' | 'unlock' | 'open' | 'desktop'>('loading')
   const [vaultStatus, setVaultStatus] = useState<VaultStatus | null>(null)
   const [toast, setToast] = useState('')
@@ -246,7 +259,7 @@ function App() {
       <Sidebar view={view} navigate={navigate} open={sidebarOpen} onClose={() => setSidebarOpen(false)} updateAvailable={Boolean(updater.update)} />
       <main className="main-area">
         <Topbar theme={theme} onTheme={() => setTheme((current) => current === 'light' ? 'dark' : 'light')} onMenu={() => setSidebarOpen(true)} onLock={lock} />
-        {view === 'vault' && <VaultView items={filteredItems} selected={selected} detail={selectedDetail} groups={groups} groupFilter={groupFilter} onGroupFilter={setGroupFilter} onManageGroups={() => setGroupsOpen(true)} onSelect={setSelected} query={query} onQuery={setQuery} category={category} onCategory={setCategory} onAdd={() => setEditor('add')} onEdit={() => setEditor('edit')} onDelete={deleteSelected} onCopy={copy} onToggleFavorite={toggleFavorite} onDetailChanged={applyDetail} />}
+        {view === 'vault' && <VaultView items={filteredItems} selected={selected} detail={selectedDetail} groups={groups} groupFilter={groupFilter} onGroupFilter={setGroupFilter} onManageGroups={() => setGroupsOpen(true)} onSelect={setSelected} query={query} onQuery={setQuery} category={category} onCategory={setCategory} onAdd={() => setEditor('add')} onImport={() => setImportOpen(true)} onEdit={() => setEditor('edit')} onDelete={deleteSelected} onCopy={copy} onToggleFavorite={toggleFavorite} onDetailChanged={applyDetail} />}
         {view === 'generator' && <GeneratorView onCopy={copy} />}
         {view === 'security' && <SecurityView items={vaultItems} breach={breach} onOpenItem={(item) => { setSelected(item); setView('vault') }} />}
         {view === 'two-factor' && <TwoFactorView onCopy={copy} />}
@@ -254,6 +267,11 @@ function App() {
       </main>
       {editor && <EntryModal initial={editor === 'edit' ? selectedDetail : null} groups={groups} onClose={() => setEditor(null)} onSave={saveEntry} />}
       {groupsOpen && <GroupManager groups={groups} onClose={() => setGroupsOpen(false)} onChanged={loadItems} />}
+      {importOpen && <CsvImportModal groups={groups} onClose={() => setImportOpen(false)} onImported={async (result) => {
+        await loadItems()
+        setImportOpen(false)
+        setToast(`Imported ${result.importedRows} encrypted password${result.importedRows === 1 ? '' : 's'}`)
+      }} />}
       {toast && <div className="toast"><Check size={16} />{toast}</div>}
       <UpdatePrompt controller={updater} />
     </div>
@@ -433,8 +451,8 @@ function ServiceIcon({ title, initials, color, large = false }: { title: string;
   return <span className={className} style={{ background: color }}>{initials}</span>
 }
 
-function VaultView({ items, selected, detail, groups, groupFilter, onGroupFilter, onManageGroups, onSelect, query, onQuery, category, onCategory, onAdd, onEdit, onDelete, onCopy, onToggleFavorite, onDetailChanged }: {
-  items: VaultItem[]; selected: VaultItem | null; detail: EntryDetail | null; groups: VaultGroup[]; groupFilter: string; onGroupFilter: (value: string) => void; onManageGroups: () => void; onSelect: (item: VaultItem) => void; query: string; onQuery: (value: string) => void; category: string; onCategory: (value: string) => void; onAdd: () => void; onEdit: () => void; onDelete: () => void; onCopy: (value: string, message?: string) => void; onToggleFavorite: (id: string) => void; onDetailChanged: (detail: EntryDetail, message: string) => Promise<void>
+function VaultView({ items, selected, detail, groups, groupFilter, onGroupFilter, onManageGroups, onSelect, query, onQuery, category, onCategory, onAdd, onImport, onEdit, onDelete, onCopy, onToggleFavorite, onDetailChanged }: {
+  items: VaultItem[]; selected: VaultItem | null; detail: EntryDetail | null; groups: VaultGroup[]; groupFilter: string; onGroupFilter: (value: string) => void; onManageGroups: () => void; onSelect: (item: VaultItem) => void; query: string; onQuery: (value: string) => void; category: string; onCategory: (value: string) => void; onAdd: () => void; onImport: () => void; onEdit: () => void; onDelete: () => void; onCopy: (value: string, message?: string) => void; onToggleFavorite: (id: string) => void; onDetailChanged: (detail: EntryDetail, message: string) => Promise<void>
 }) {
   const [passwordVisible, setPasswordVisible] = useState(false)
   const [historyOpen, setHistoryOpen] = useState(false)
@@ -498,7 +516,7 @@ function VaultView({ items, selected, detail, groups, groupFilter, onGroupFilter
   return <>
     <div className="vault-page">
       <section className="vault-browser">
-        <div className="page-title-row"><div><p className="eyebrow">LOCAL VAULT</p><h1>Your vault</h1><p>Encrypted records stored in your local KDBX file.</p></div><button className="primary-button" onClick={onAdd}><Plus size={18} />New item</button></div>
+        <div className="page-title-row"><div><p className="eyebrow">LOCAL VAULT</p><h1>Your vault</h1><p>Encrypted records stored in your local KDBX file.</p></div><div className="page-actions"><button className="secondary-button" onClick={onImport}><FileUp size={17} />Import CSV</button><button className="primary-button" onClick={onAdd}><Plus size={18} />New item</button></div></div>
         <div className="vault-stats">
           <div><span className="stat-icon lavender"><KeyRound /></span><p><strong>{items.length}</strong><span>Visible items</span></p></div>
           <div><span className="stat-icon mint"><ShieldCheck /></span><p><strong>{score}%</strong><span>Security score</span></p></div>
@@ -578,6 +596,74 @@ function GroupManager({ groups, onClose, onChanged }: { groups: VaultGroup[]; on
   }
   const editable = groups.filter((group) => group.parentId)
   return <div className="modal-backdrop"><div className="modal group-modal"><button type="button" className="modal-close" onClick={onClose}><X size={20} /></button><span className="modal-icon"><FolderTree /></span><h2>Organize groups</h2><p>Groups remain compatible with other KDBX applications.</p><form className="group-create" onSubmit={createGroup}><input value={name} onChange={(event) => setName(event.target.value)} placeholder="New group name" required /><button className="primary-button"><Plus size={15} />Add group</button></form>{error && <p className="form-error">{error}</p>}<div className="group-list">{editable.map((group) => <div className="group-row" key={group.id}><FolderTree size={16} /><strong>{group.name}</strong><button onClick={() => renameGroup(group)} aria-label={`Rename ${group.name}`}><Pencil size={15} /></button><button onClick={() => deleteGroup(group)} aria-label={`Delete ${group.name}`}><Trash2 size={15} /></button></div>)}{!editable.length && <div className="empty-state"><FolderTree size={24} /><strong>No custom groups</strong><span>Create one to organize vault items.</span></div>}</div></div></div>
+}
+
+function CsvImportModal({ groups, onClose, onImported }: { groups: VaultGroup[]; onClose: () => void; onImported: (result: CsvImportResult) => Promise<void> }) {
+  const [preview, setPreview] = useState<CsvImportPreview | null>(null)
+  const [targetGroupId, setTargetGroupId] = useState('')
+  const [state, setState] = useState<'idle' | 'previewing' | 'importing'>('idle')
+  const [error, setError] = useState('')
+
+  const chooseFile = async () => {
+    setError('')
+    const path = await open({
+      multiple: false,
+      directory: false,
+      title: 'Choose a password CSV export',
+      filters: [{ name: 'CSV files', extensions: ['csv'] }],
+    })
+    if (typeof path !== 'string') return
+    setState('previewing')
+    try {
+      setPreview(await invoke<CsvImportPreview>('preview_csv_import', { path }))
+    } catch (cause) {
+      setPreview(null)
+      setError(errorMessage(cause))
+    } finally {
+      setState('idle')
+    }
+  }
+
+  const importPasswords = async () => {
+    if (!preview || preview.importableRows === 0) return
+    setError('')
+    setState('importing')
+    try {
+      const result = await invoke<CsvImportResult>('import_csv_passwords', {
+        token: preview.token,
+        targetGroupId: targetGroupId || null,
+      })
+      await onImported(result)
+    } catch (cause) {
+      setError(errorMessage(cause))
+      setState('idle')
+    }
+  }
+
+  return <div className="modal-backdrop"><div className="modal import-modal">
+    <button type="button" className="modal-close" onClick={onClose}><X size={20} /></button>
+    <span className="modal-icon"><FileUp /></span>
+    <h2>Import passwords from CSV</h2>
+    <p>Ciphera parses the export in Rust and shows counts only. Passwords are written to KDBX in one verified, atomic save.</p>
+    {!preview && <button className="import-picker" onClick={chooseFile} disabled={state === 'previewing'}>
+      <FileUp size={24} />
+      <strong>{state === 'previewing' ? 'Reading CSV securely…' : 'Choose CSV file'}</strong>
+      <span>Supports common Chromium, Firefox, Bitwarden, KeePassXC, 1Password, Proton Pass, and generic column names.</span>
+    </button>}
+    {preview && <>
+      <div className="import-file"><FileUp size={17} /><div><strong>{preview.fileName}</strong><span>{preview.sourceFormat} · {preview.totalRows} data rows</span></div><button className="text-button" onClick={chooseFile} disabled={state !== 'idle'}>Change</button></div>
+      <div className="import-stats">
+        <div><strong>{preview.importableRows}</strong><span>Ready to import</span></div>
+        <div><strong>{preview.duplicateRows}</strong><span>Exact duplicates</span></div>
+        <div><strong>{preview.skippedRows}</strong><span>Skipped</span></div>
+      </div>
+      <label className="import-group">DESTINATION GROUP<select value={targetGroupId} onChange={(event) => setTargetGroupId(event.target.value)}><option value="">Vault root</option>{groups.filter((group) => group.parentId).map((group) => <option key={group.id} value={group.id}>{group.name}</option>)}</select></label>
+      {preview.issues.length > 0 && <div className="import-issues"><strong>Skipped row details</strong>{preview.issues.map((issue) => <span key={`${issue.row}-${issue.message}`}>Row {issue.row}: {issue.message}</span>)}</div>}
+    </>}
+    <div className="import-warning"><AlertTriangle size={17} /><span>CSV exports are unencrypted plaintext. Delete the source file securely after confirming the import.</span></div>
+    {error && <p className="form-error">{error}</p>}
+    <div className="modal-actions"><button type="button" onClick={onClose}>Cancel</button>{preview && <button type="button" className="primary-button" onClick={importPasswords} disabled={state !== 'idle' || preview.importableRows === 0}>{state === 'importing' ? 'Encrypting…' : `Import ${preview.importableRows}`}</button>}</div>
+  </div></div>
 }
 
 function GeneratorView({ onCopy }: { onCopy: (value: string, message?: string) => void }) {

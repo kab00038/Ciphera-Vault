@@ -1,9 +1,13 @@
-use ciphera_core::{origin_matches, EntryCategory, EntryInput, Vault, VaultError, VaultInfo};
+use ciphera_core::{
+    origin_matches, CsvImportPreview, CsvImportResult, EntryCategory, EntryInput, Vault,
+    VaultError, VaultInfo, MAX_CSV_IMPORT_BYTES,
+};
 use ciphera_platform::{PinUnlockStatus, PinUnlockStore, QuickUnlockStore, SecureStorageError};
 use rand::RngCore;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use sha1::{Digest, Sha1};
+use sha1::{Digest as Sha1Digest, Sha1};
+use sha2::{Digest as Sha2Digest, Sha256};
 use std::{
     collections::{BTreeMap, HashMap},
     fs,
@@ -12,7 +16,7 @@ use std::{
     path::{Path, PathBuf},
     sync::{Arc, Mutex},
     thread,
-    time::Duration,
+    time::{Duration, Instant},
 };
 #[cfg(any(target_os = "windows", target_os = "linux"))]
 use tauri::{
@@ -20,7 +24,7 @@ use tauri::{
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
 };
 use tauri::{AppHandle, Manager, State};
-use zeroize::Zeroize;
+use zeroize::{Zeroize, Zeroizing};
 
 const NATIVE_HOST_NAME: &str = "com.ciphera.browser";
 const EXTENSION_ID: &str = "nbnpilplfaaigikkigfoeolljlpgknbg";
@@ -39,6 +43,7 @@ struct AppState {
     descriptor: BridgeDescriptor,
     vault: Arc<Mutex<Vault>>,
     pin_state_lock: Arc<Mutex<()>>,
+    pending_csv_import: Arc<Mutex<Option<PendingCsvImport>>>,
 }
 
 #[derive(Clone, Deserialize, Serialize)]
@@ -87,7 +92,24 @@ struct BreachCheckResult {
     breached_entries: Vec<BreachMatch>,
 }
 
+#[derive(Clone)]
+struct PendingCsvImport {
+    token: String,
+    path: PathBuf,
+    digest: [u8; 32],
+    created_at: Instant,
+}
+
 #[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CsvImportPreviewResponse {
+    token: String,
+    file_name: String,
+    #[serde(flatten)]
+    preview: CsvImportPreview,
+}
+
+#[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct CommandError {
     code: &'static str,
@@ -288,6 +310,7 @@ fn start_bridge(vault: Arc<Mutex<Vault>>) -> Result<AppState, String> {
         descriptor,
         vault,
         pin_state_lock: Arc::new(Mutex::new(())),
+        pending_csv_import: Arc::new(Mutex::new(None)),
     };
     let server_state = state.clone();
     thread::spawn(move || {
@@ -519,6 +542,111 @@ fn get_vault_entry(id: String, state: State<'_, AppState>) -> Result<Value, Comm
         code: "serialization_error",
         message: "Could not serialize vault entry".to_owned(),
     })
+}
+
+fn read_csv_import(path: &Path) -> Result<Zeroizing<Vec<u8>>, CommandError> {
+    let metadata = fs::metadata(path).map_err(|error| CommandError {
+        code: "io_error",
+        message: format!("Could not read CSV file: {error}"),
+    })?;
+    if !metadata.is_file() {
+        return Err(VaultError::InvalidPath.into());
+    }
+    if metadata.len() > MAX_CSV_IMPORT_BYTES as u64 {
+        return Err(VaultError::CsvTooLarge.into());
+    }
+    fs::read(path)
+        .map(Zeroizing::new)
+        .map_err(|error| CommandError {
+            code: "io_error",
+            message: format!("Could not read CSV file: {error}"),
+        })
+}
+
+#[tauri::command]
+fn preview_csv_import(
+    path: String,
+    state: State<'_, AppState>,
+) -> Result<CsvImportPreviewResponse, CommandError> {
+    let path = PathBuf::from(path);
+    let bytes = read_csv_import(&path)?;
+    let preview = state
+        .vault
+        .lock()
+        .map_err(|_| CommandError {
+            code: "vault_state_unavailable",
+            message: "Vault state is unavailable".to_owned(),
+        })?
+        .preview_csv_import(bytes.as_slice())?;
+    let pending = PendingCsvImport {
+        token: random_token(),
+        path: path.clone(),
+        digest: Sha256::digest(bytes.as_slice()).into(),
+        created_at: Instant::now(),
+    };
+    let response = CsvImportPreviewResponse {
+        token: pending.token.clone(),
+        file_name: path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("passwords.csv")
+            .to_owned(),
+        preview,
+    };
+    *state.pending_csv_import.lock().map_err(|_| CommandError {
+        code: "csv_import_state_unavailable",
+        message: "CSV import state is unavailable".to_owned(),
+    })? = Some(pending);
+    Ok(response)
+}
+
+#[tauri::command]
+fn import_csv_passwords(
+    token: String,
+    target_group_id: Option<String>,
+    state: State<'_, AppState>,
+) -> Result<CsvImportResult, CommandError> {
+    let pending = {
+        let mut guard = state.pending_csv_import.lock().map_err(|_| CommandError {
+            code: "csv_import_state_unavailable",
+            message: "CSV import state is unavailable".to_owned(),
+        })?;
+        let pending = guard.as_ref().ok_or(CommandError {
+            code: "csv_preview_required",
+            message: "Preview the CSV file again before importing".to_owned(),
+        })?;
+        if pending.token != token {
+            return Err(CommandError {
+                code: "csv_preview_invalid",
+                message: "CSV import preview is invalid".to_owned(),
+            });
+        }
+        if pending.created_at.elapsed() > Duration::from_secs(10 * 60) {
+            *guard = None;
+            return Err(CommandError {
+                code: "csv_preview_expired",
+                message: "CSV import preview expired; preview the file again".to_owned(),
+            });
+        }
+        guard.take().expect("pending CSV import was checked")
+    };
+    let bytes = read_csv_import(&pending.path)?;
+    let digest: [u8; 32] = Sha256::digest(bytes.as_slice()).into();
+    if digest != pending.digest {
+        return Err(CommandError {
+            code: "csv_changed",
+            message: "CSV file changed after preview; preview it again".to_owned(),
+        });
+    }
+    state
+        .vault
+        .lock()
+        .map_err(|_| CommandError {
+            code: "vault_state_unavailable",
+            message: "Vault state is unavailable".to_owned(),
+        })?
+        .import_csv_passwords(bytes.as_slice(), target_group_id.as_deref())
+        .map_err(Into::into)
 }
 
 #[tauri::command]
@@ -1267,6 +1395,7 @@ mod tests {
             },
             vault: Arc::new(Mutex::new(vault)),
             pin_state_lock: Arc::new(Mutex::new(())),
+            pending_csv_import: Arc::new(Mutex::new(None)),
         };
         (directory, state, entry.summary.id)
     }
@@ -1403,6 +1532,54 @@ mod tests {
     }
 
     #[test]
+    fn csv_commands_reject_changed_source_then_import_after_new_preview() {
+        let (directory, state, _) = unlocked_state();
+        let csv_path = directory.path().join("passwords.csv");
+        fs::write(
+            &csv_path,
+            b"name,url,username,password\nImported,https://import.example,alex,FirstPassword42\n",
+        )
+        .expect("write CSV");
+        let app = tauri::test::mock_builder()
+            .manage(state)
+            .build(tauri::test::mock_context(tauri::test::noop_assets()))
+            .expect("build mock application");
+
+        let preview = preview_csv_import(csv_path.display().to_string(), app.state::<AppState>())
+            .expect("preview CSV command");
+        assert_eq!(preview.file_name, "passwords.csv");
+        assert_eq!(preview.preview.importable_rows, 1);
+        fs::write(
+            &csv_path,
+            b"name,url,username,password\nImported,https://import.example,alex,ChangedPassword42\n",
+        )
+        .expect("change CSV after preview");
+        let changed = import_csv_passwords(preview.token, None, app.state::<AppState>())
+            .expect_err("reject changed CSV");
+        assert_eq!(changed.code, "csv_changed");
+
+        let next_preview =
+            preview_csv_import(csv_path.display().to_string(), app.state::<AppState>())
+                .expect("preview changed CSV");
+        let result = import_csv_passwords(next_preview.token, None, app.state::<AppState>())
+            .expect("import unchanged CSV");
+        assert_eq!(result.imported_rows, 1);
+        let vault = app.state::<AppState>();
+        let vault = vault.vault.lock().expect("lock vault");
+        let imported = vault
+            .list_entries(Some("Imported"))
+            .expect("list imported entry");
+        assert_eq!(imported.len(), 1);
+        assert_eq!(
+            vault
+                .get_entry(&imported[0].id)
+                .expect("read imported entry")
+                .password,
+            "ChangedPassword42"
+        );
+    }
+
+    #[test]
     fn pwned_password_hash_and_padded_range_are_matched_locally() {
         assert_eq!(
             password_sha1_hex("password"),
@@ -1499,6 +1676,8 @@ pub fn run() {
             lock_vault,
             list_vault_entries,
             get_vault_entry,
+            preview_csv_import,
+            import_csv_passwords,
             add_vault_entry,
             update_vault_entry,
             delete_vault_entry,

@@ -15,3 +15,8 @@ uuid = { version = "1.18", features = ["serde", "v4"] }
 zeroize = { version = "1.8", features = ["zeroize_derive"] }
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
 sha1 = "0.10"
+
+# Strip release-only overhead without slowing builds with LTO or reducing crypto throughput.
+[profile.release]
+panic = "abort"
+strip = "symbols"

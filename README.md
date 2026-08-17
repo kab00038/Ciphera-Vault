@@ -11,7 +11,6 @@ Download Ciphera only from the repository's official **[GitHub Releases page](ht
 | Platform | Download | Notes |
 | --- | --- | --- |
 | Windows x86-64 | `Ciphera_*_x64-setup.exe` | Recommended interactive installer |
-| Windows x86-64 | `Ciphera_*_x64_en-US.msi` | MSI package for managed or manual installation |
 | macOS Apple Silicon | `Ciphera_*_aarch64.dmg` | M1, M2, M3, M4, and later Apple Silicon Macs |
 | macOS Intel | `Ciphera_*_x64.dmg` | Intel-based Macs |
 | Debian or Ubuntu x86-64 | `Ciphera_*_amd64.deb` | Native Debian package |
@@ -38,7 +37,7 @@ For the most conservative installation, download `install.sh`, inspect it, and r
 
 ### Windows
 
-1. Download the `.exe` installer, or the `.msi` if you specifically need MSI.
+1. Download the `.exe` installer.
 2. Open the downloaded file.
 3. Follow the installer prompts, then launch **Ciphera** from the Start menu.
 
@@ -107,6 +106,14 @@ Choose **Create a new vault** or open an existing KDBX file. On Linux, the defau
 Ciphera cannot recover a forgotten master password. Every successful vault change is written atomically and rotates five encrypted snapshots beside the vault as `<vault>.bak` through `<vault>.bak.4`. Keep additional backups on separate storage.
 
 Optional PIN quick unlock stores its protected credential and PIN verifier in the operating-system credential vault. The master password remains the vault's encryption credential.
+
+## Import passwords from CSV
+
+Open the vault and select **Import CSV**. Ciphera previews only row counts and validation results before asking where to place the imported logins. The plaintext passwords and notes are parsed by the Rust process and committed to KDBX in one verified, atomic save.
+
+The importer recognizes common column names used by Chromium browsers, Firefox, Bitwarden, KeePassXC, 1Password, Proton Pass, and generic CSV exports. A password column is required. Title/name, username/email, URL, notes, favorite, and TOTP columns are imported when present. Rows without passwords or an identifiable title, username, or URL are reported and skipped; exact duplicates are not imported again.
+
+CSV files are limited to 10 MiB and 100,000 data rows. CSV exports are unencrypted plaintext, so delete the source export securely after confirming the imported records.
 
 ## Browser extension
 

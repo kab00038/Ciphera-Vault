@@ -34,6 +34,32 @@ pub struct BackupInfo {
     pub modified_at: Option<String>,
 }
 
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CsvImportIssue {
+    pub row: usize,
+    pub message: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CsvImportPreview {
+    pub source_format: String,
+    pub total_rows: usize,
+    pub importable_rows: usize,
+    pub duplicate_rows: usize,
+    pub skipped_rows: usize,
+    pub issues: Vec<CsvImportIssue>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CsvImportResult {
+    pub imported_rows: usize,
+    pub duplicate_rows: usize,
+    pub skipped_rows: usize,
+}
+
 #[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 pub enum EntryCategory {
     #[default]

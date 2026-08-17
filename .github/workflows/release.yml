@@ -14,6 +14,10 @@ on:
 permissions:
   contents: write
 
+concurrency:
+  group: release-${{ inputs.release_tag || github.ref_name }}
+  cancel-in-progress: false
+
 jobs:
   verify:
     name: Verify release source
@@ -70,15 +74,23 @@ jobs:
         include:
           - name: Linux x86_64
             platform: ubuntu-22.04
+            target: x86_64-unknown-linux-gnu
+            cache_key: linux-x86_64
             args: --bundles appimage,deb,rpm
           - name: Windows x86_64
             platform: windows-latest
-            args: --bundles nsis,msi
+            target: x86_64-pc-windows-msvc
+            cache_key: windows-x86_64
+            args: --bundles nsis
           - name: macOS Apple Silicon
             platform: macos-latest
+            target: aarch64-apple-darwin
+            cache_key: macos-aarch64
             args: --target aarch64-apple-darwin --bundles dmg
           - name: macOS Intel
             platform: macos-latest
+            target: x86_64-apple-darwin
+            cache_key: macos-x86_64
             args: --target x86_64-apple-darwin --bundles dmg
 
     runs-on: ${{ matrix.platform }}
@@ -102,11 +114,12 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: 1.88.0
-          targets: ${{ startsWith(matrix.name, 'macOS') && 'aarch64-apple-darwin,x86_64-apple-darwin' || '' }}
+          targets: ${{ matrix.target }}
 
       - uses: swatinem/rust-cache@v2
         with:
           workspaces: "./ -> target"
+          shared-key: desktop-${{ matrix.cache_key }}
 
       - run: npm ci
 
@@ -126,11 +139,9 @@ jobs:
           updaterJsonPreferNsis: true
           args: ${{ matrix.args }}
 
-  publish-arch:
-    name: Publish Arch Linux x86_64
-    needs:
-      - verify
-      - publish
+  build-arch:
+    name: Build Arch Linux x86_64
+    needs: verify
     runs-on: ubuntu-22.04
     container: archlinux:base-devel
     steps:
@@ -139,13 +150,39 @@ jobs:
           ref: ${{ inputs.release_tag || github.ref }}
 
       - name: Install Arch build dependencies
-        run: pacman -Syu --noconfirm git github-cli gtk3 nodejs npm rust webkit2gtk-4.1
+        run: pacman -Syu --noconfirm git gtk3 nodejs npm rust webkit2gtk-4.1
+
+      - uses: swatinem/rust-cache@v2
+        with:
+          workspaces: "./ -> target"
+          shared-key: desktop-arch-x86_64
 
       - name: Build pacman package
         run: |
           useradd --create-home builder
           chown -R builder:builder "$GITHUB_WORKSPACE"
           runuser --user builder -- env HOME=/home/builder ./packaging/arch/build-package.sh
+
+      - name: Stage Arch package
+        uses: actions/upload-artifact@v6
+        with:
+          name: ciphera-arch-x86_64-pacman
+          path: packaging/arch/*.pkg.tar.zst
+          if-no-files-found: error
+
+  publish-arch:
+    name: Publish Arch Linux x86_64
+    needs:
+      - verify
+      - publish
+      - build-arch
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Download Arch package
+        uses: actions/download-artifact@v7
+        with:
+          name: ciphera-arch-x86_64-pacman
+          path: packaging/arch
 
       - name: Upload package to draft release
         env:

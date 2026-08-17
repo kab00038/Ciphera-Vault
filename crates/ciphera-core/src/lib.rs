@@ -1,10 +1,13 @@
+mod csv_import;
 mod error;
 mod model;
 
+pub use csv_import::MAX_CSV_IMPORT_BYTES;
 pub use error::VaultError;
 pub use model::{
-    AttachmentSummary, BackupInfo, EntryCategory, EntryDetail, EntryHistory, EntryInput,
-    EntrySummary, Group, KdfParameters, PasswordHealth, TotpCode, VaultInfo,
+    AttachmentSummary, BackupInfo, CsvImportIssue, CsvImportPreview, CsvImportResult,
+    EntryCategory, EntryDetail, EntryHistory, EntryInput, EntrySummary, Group, KdfParameters,
+    PasswordHealth, TotpCode, VaultInfo,
 };
 
 use atomic_write_file::AtomicWriteFile;
@@ -19,7 +22,7 @@ use keepass::{
 };
 use sha2::{Digest, Sha256};
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     fs,
     hint::black_box,
     io::Write,
@@ -331,6 +334,66 @@ impl Vault {
             .collect();
         codes.sort_by_key(|code| code.title.to_lowercase());
         Ok(codes)
+    }
+
+    pub fn preview_csv_import(&self, bytes: &[u8]) -> Result<CsvImportPreview, VaultError> {
+        let state = self.state()?;
+        let parsed = csv_import::parse_csv_import(bytes)?;
+        let (importable, duplicate_rows) = unique_import_rows(&state.database, parsed.rows);
+        Ok(CsvImportPreview {
+            source_format: parsed.source_format,
+            total_rows: parsed.total_rows,
+            importable_rows: importable.len(),
+            duplicate_rows,
+            skipped_rows: parsed.skipped_rows,
+            issues: parsed.issues,
+        })
+    }
+
+    pub fn import_csv_passwords(
+        &mut self,
+        bytes: &[u8],
+        target_group_id: Option<&str>,
+    ) -> Result<CsvImportResult, VaultError> {
+        let parsed = csv_import::parse_csv_import(bytes)?;
+        let state = self.state_mut()?;
+        let group_id = match target_group_id {
+            Some(id) => parse_group_id(id)?,
+            None => state.database.root().id(),
+        };
+        if state.database.group(group_id).is_none() {
+            return Err(VaultError::GroupNotFound);
+        }
+        let (rows, duplicate_rows) = unique_import_rows(&state.database, parsed.rows);
+        let imported_rows = rows.len();
+        if imported_rows == 0 {
+            return Ok(CsvImportResult {
+                imported_rows,
+                duplicate_rows,
+                skipped_rows: parsed.skipped_rows,
+            });
+        }
+
+        let previous = state.database.clone();
+        {
+            let mut group = state
+                .database
+                .group_mut(group_id)
+                .ok_or(VaultError::GroupNotFound)?;
+            for input in &rows {
+                let mut entry = group.add_entry();
+                apply_input(&mut entry, input);
+            }
+        }
+        if let Err(error) = save_state(state) {
+            state.database = previous;
+            return Err(error);
+        }
+        Ok(CsvImportResult {
+            imported_rows,
+            duplicate_rows,
+            skipped_rows: parsed.skipped_rows,
+        })
     }
 
     pub fn add_entry(&mut self, input: EntryInput) -> Result<EntryDetail, VaultError> {
@@ -674,6 +737,26 @@ pub fn calibrate_argon2id() -> KdfParameters {
     }
 }
 
+fn unique_import_rows(database: &Database, rows: Vec<EntryInput>) -> (Vec<EntryInput>, usize) {
+    let mut fingerprints: HashSet<_> = database
+        .iter_all_entries()
+        .map(|entry| csv_import::stored_entry_fingerprint(&entry))
+        .collect();
+    let mut duplicate_rows = 0;
+    let importable = rows
+        .into_iter()
+        .filter(|input| {
+            if fingerprints.insert(csv_import::input_fingerprint(input)) {
+                true
+            } else {
+                duplicate_rows += 1;
+                false
+            }
+        })
+        .collect();
+    (importable, duplicate_rows)
+}
+
 fn validate_password(password: &str) -> Result<(), VaultError> {
     if password.is_empty() {
         Err(VaultError::EmptyPassword)
@@ -720,23 +803,28 @@ fn apply_input(entry: &mut keepass::db::Entry, input: &EntryInput) {
         FIELD_FAVORITE,
         if input.favorite { "true" } else { "false" },
     );
-    match input.totp.as_deref().map(str::trim) {
-        Some(totp) if !totp.is_empty() => {
-            let value = if totp.starts_with("otpauth://") {
-                totp.to_owned()
-            } else {
-                let secret: String = totp
-                    .chars()
-                    .filter(|character| !character.is_whitespace())
-                    .collect();
-                format!("otpauth://totp/Ciphera?secret={secret}&period=30&digits=6")
-            };
-            entry.set_protected(fields::OTP, value);
-        }
-        _ => {
-            entry.fields.remove(fields::OTP);
-        }
+    if let Some(totp) = canonical_totp(input.totp.as_deref()) {
+        entry.set_protected(fields::OTP, totp);
+    } else {
+        entry.fields.remove(fields::OTP);
     }
+}
+
+fn canonical_totp(totp: Option<&str>) -> Option<String> {
+    let totp = totp?.trim();
+    if totp.is_empty() {
+        return None;
+    }
+    if totp.starts_with("otpauth://") {
+        return Some(totp.to_owned());
+    }
+    let secret: String = totp
+        .chars()
+        .filter(|character| !character.is_whitespace())
+        .collect();
+    Some(format!(
+        "otpauth://totp/Ciphera?secret={secret}&period=30&digits=6"
+    ))
 }
 
 fn entry_summary(
@@ -1283,6 +1371,76 @@ mod tests {
                 .password,
             "FirstPassword42"
         );
+    }
+
+    #[test]
+    fn csv_import_previews_deduplicates_and_saves_once() {
+        let directory = TempDir::new().expect("temp directory");
+        let path = directory.path().join("vault.kdbx");
+        let mut vault = Vault::new();
+        vault
+            .create_with_parameters(&path, "master password", test_kdf())
+            .expect("create vault");
+        let group = vault
+            .create_group(None, "Imported accounts")
+            .expect("create import group");
+        let csv = b"folder,favorite,type,name,notes,fields,reprompt,login_uri,login_username,login_password,login_totp\n\
+Work,1,login,\"Example, Inc.\",\"First line\nSecond line\",,0,https://example.com,alex,\"Password,WithComma42\",JBSWY3DPEHPK3PXP\n\
+Work,1,login,\"Example, Inc.\",\"First line\nSecond line\",,0,https://example.com,alex,\"Password,WithComma42\",JBSWY3DPEHPK3PXP\n\
+,0,login,Other,,,0,https://other.example,other,SecondPassword42,\n\
+,0,login,Empty,,,0,https://empty.example,empty,,\n";
+
+        let preview = vault.preview_csv_import(csv).expect("preview CSV");
+        assert_eq!(preview.source_format, "Bitwarden CSV");
+        assert_eq!(preview.total_rows, 4);
+        assert_eq!(preview.importable_rows, 2);
+        assert_eq!(preview.duplicate_rows, 1);
+        assert_eq!(preview.skipped_rows, 1);
+        assert_eq!(preview.issues[0].row, 5);
+
+        let result = vault
+            .import_csv_passwords(csv, Some(&group.id))
+            .expect("import CSV");
+        assert_eq!(result.imported_rows, 2);
+        assert_eq!(result.duplicate_rows, 1);
+        assert_eq!(result.skipped_rows, 1);
+        let entries = vault.list_entries(None).expect("list imports");
+        assert_eq!(entries.len(), 2);
+        assert!(entries.iter().all(|entry| entry.group_id == group.id));
+        let imported = entries
+            .iter()
+            .find(|entry| entry.title == "Example, Inc.")
+            .expect("find quoted import");
+        let detail = vault.get_entry(&imported.id).expect("imported detail");
+        assert_eq!(detail.password, "Password,WithComma42");
+        assert_eq!(detail.notes, "First line\nSecond line");
+        assert!(detail
+            .totp
+            .as_deref()
+            .is_some_and(|totp| totp.contains("secret=JBSWY3DPEHPK3PXP")));
+        assert_eq!(vault.backups().expect("import backup").len(), 2);
+
+        let repeated = vault.preview_csv_import(csv).expect("repeat preview");
+        assert_eq!(repeated.importable_rows, 0);
+        assert_eq!(repeated.duplicate_rows, 3);
+    }
+
+    #[test]
+    fn csv_import_rejects_missing_password_column_without_mutation() {
+        let directory = TempDir::new().expect("temp directory");
+        let path = directory.path().join("vault.kdbx");
+        let mut vault = Vault::new();
+        vault
+            .create_with_parameters(&path, "master password", test_kdf())
+            .expect("create vault");
+        assert!(matches!(
+            vault.preview_csv_import(b"name,url,username\nExample,https://example.com,alex\n"),
+            Err(VaultError::CsvMissingPasswordColumn)
+        ));
+        assert!(vault
+            .list_entries(None)
+            .expect("unchanged vault")
+            .is_empty());
     }
 
     #[test]

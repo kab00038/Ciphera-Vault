@@ -3,7 +3,7 @@ name: Package desktop application
 on:
   push:
     branches:
-      - "**"
+      - main
   pull_request:
   workflow_dispatch:
 
@@ -56,24 +56,29 @@ jobs:
   package:
     name: Package ${{ matrix.name }}
     needs: verify
+    if: github.event_name == 'workflow_dispatch'
     strategy:
       fail-fast: false
       matrix:
         include:
           - name: Linux x86_64
             platform: ubuntu-22.04
+            target: x86_64-unknown-linux-gnu
             args: --no-sign --bundles appimage,deb,rpm
             artifact: linux-x86_64
           - name: Windows x86_64
             platform: windows-latest
+            target: x86_64-pc-windows-msvc
             args: --no-sign --bundles nsis,msi
             artifact: windows-x86_64
           - name: macOS Apple Silicon
             platform: macos-latest
+            target: aarch64-apple-darwin
             args: --no-sign --target aarch64-apple-darwin --bundles dmg
             artifact: macos-aarch64
           - name: macOS Intel
             platform: macos-latest
+            target: x86_64-apple-darwin
             args: --no-sign --target x86_64-apple-darwin --bundles dmg
             artifact: macos-x86_64
 
@@ -96,12 +101,13 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: 1.88.0
-          targets: ${{ startsWith(matrix.name, 'macOS') && 'aarch64-apple-darwin,x86_64-apple-darwin' || '' }}
+          targets: ${{ matrix.target }}
 
       - name: Cache Rust build output
         uses: swatinem/rust-cache@v2
         with:
           workspaces: "./ -> target"
+          shared-key: desktop-${{ matrix.artifact }}
 
       - name: Install frontend dependencies
         run: npm ci
@@ -118,6 +124,7 @@ jobs:
   package-arch:
     name: Package Arch Linux x86_64
     needs: verify
+    if: github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-22.04
     container: archlinux:base-devel
     steps:
@@ -125,6 +132,11 @@ jobs:
 
       - name: Install Arch build dependencies
         run: pacman -Syu --noconfirm git gtk3 nodejs npm rust webkit2gtk-4.1
+
+      - uses: swatinem/rust-cache@v2
+        with:
+          workspaces: "./ -> target"
+          shared-key: desktop-arch-x86_64
 
       - name: Build pacman package
         run: |

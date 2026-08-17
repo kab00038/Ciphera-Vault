@@ -31,6 +31,14 @@ pub enum VaultError {
     EmptyAttachmentName,
     #[error("attachment exceeds the 20 MiB limit")]
     AttachmentTooLarge,
+    #[error("CSV import exceeds the 10 MiB limit")]
+    CsvTooLarge,
+    #[error("CSV import exceeds the 100,000 row limit")]
+    CsvTooManyRows,
+    #[error("CSV import is malformed or not UTF-8")]
+    InvalidCsv,
+    #[error("CSV import requires a password column")]
+    CsvMissingPasswordColumn,
     #[error("a master password is required")]
     EmptyPassword,
     #[error("entry title is required")]
@@ -65,6 +73,10 @@ impl VaultError {
             Self::AttachmentNotFound => "attachment_not_found",
             Self::EmptyAttachmentName => "empty_attachment_name",
             Self::AttachmentTooLarge => "attachment_too_large",
+            Self::CsvTooLarge => "csv_too_large",
+            Self::CsvTooManyRows => "csv_too_many_rows",
+            Self::InvalidCsv => "invalid_csv",
+            Self::CsvMissingPasswordColumn => "csv_missing_password_column",
             Self::EmptyTitle => "empty_title",
             Self::AlreadyExists(_) => "vault_exists",
             Self::NotFound(_) => "vault_not_found",
